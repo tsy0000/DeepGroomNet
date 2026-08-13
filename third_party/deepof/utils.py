@@ -1,0 +1,4394 @@
+﻿# @author lucasmiranda42 and NoCreativeIdeaForGoodUsername
+# encoding: utf-8
+# module deepof
+
+"""Functions and general utilities for the deepof package."""
+import argparse
+import copy
+import pickle
+import math
+import multiprocessing
+import os
+import warnings
+from collections import OrderedDict
+from copy import deepcopy
+from itertools import combinations, product
+from math import atan2, dist
+from typing import Any, List, NewType, Tuple, Union, Optional, Dict
+
+# For optional verification plots, will probably be removed later
+from matplotlib import pyplot as plt
+from dataclasses import dataclass
+
+
+import cv2
+import h5py
+import networkx as nx
+import numba as nb
+import numpy as np
+import pandas as pd
+import regex as re
+import requests
+import sleap_io as sio
+from joblib import Parallel, delayed
+from scipy.signal import savgol_filter, medfilt
+from segment_anything import SamPredictor, sam_model_registry
+from shapely.geometry import Point, Polygon
+from sklearn import mixture
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import IterativeImputer
+from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score
+from sklearn.neighbors import NearestNeighbors
+from sklearn.model_selection import StratifiedKFold
+from scipy.stats import chi2_contingency, mode
+from tqdm import tqdm
+
+from deepof.config import PROGRESS_BAR_FIXED_WIDTH, ROI_COLORS, CONTINUOUS_BEHAVIORS, BitPrecision
+import deepof.data
+from deepof.data_loading import get_dt, save_dt, _suppress_warning
+import deepof.legacy_smote_handling
+import deepof.utils
+
+
+
+# DEFINE CUSTOM ANNOTATED TYPES #
+project = NewType("deepof_project", Any)
+coordinates = NewType("deepof_coordinates", Any)
+table_dict = NewType("deepof_table_dict", Any)
+
+
+# Workaround class for cleaner Key error message display (allows for line breaks)
+class KeyErrorMessage(str):
+    def __repr__(self): return str(self)
+
+# CONNECTIVITY AND GRAPH REPRESENTATIONS
+
+
+@nb.njit()
+def rts_smoother_numba(measurements, F, H, Q, R):  # pragma: no cover
+    """
+    Implements the Rauch-Tung-Striebel (RTS) smoother for state estimation.
+
+    This function performs both forward and backward passes to estimate the optimal state
+    sequence given a set of noisy measurements. It first applies the Kalman filter in a
+    forward pass and then refines the estimates using the RTS smoother in a backward pass.
+
+    Args:
+        measurements (np.ndarray): Array of measurements, shape (n_timesteps, n_dim_measurement).
+        F (np.ndarray): State transition matrix, shape (n_dim_state, n_dim_state).
+        H (np.ndarray): Observation matrix, shape (n_dim_measurement, n_dim_state).
+        Q (np.ndarray): Process noise covariance matrix, shape (n_dim_state, n_dim_state).
+        R (np.ndarray): Measurement noise covariance matrix, shape (n_dim_measurement, n_dim_measurement).
+
+    Returns:
+        smoothed_states (np.ndarray): Smoothed state estimates, shape (n_timesteps, n_dim_state).
+
+    """
+    n_timesteps, n_dim_measurement = measurements.shape
+    n_dim_state = F.shape[0]
+
+    # Ensure all inputs are float64
+    measurements = measurements.astype(np.float64)
+    F = F.astype(np.float64)
+    H = H.astype(np.float64)
+    Q = Q.astype(np.float64)
+    R = R.astype(np.float64)
+
+    # Forward pass (Kalman filter)
+    filtered_states = np.zeros((n_timesteps, n_dim_state), dtype=np.float64)
+    filtered_covariances = np.zeros(
+        (n_timesteps, n_dim_state, n_dim_state), dtype=np.float64
+    )
+    predicted_states = np.zeros((n_timesteps, n_dim_state), dtype=np.float64)
+    predicted_covariances = np.zeros(
+        (n_timesteps, n_dim_state, n_dim_state), dtype=np.float64
+    )
+
+    # Initialize
+    filtered_states[0] = measurements[0]
+    filtered_covariances[0] = (
+        np.eye(n_dim_state, dtype=np.float64) * 1000
+    )  # Large initial uncertainty
+
+    for t in range(1, n_timesteps):
+        # Predict
+        predicted_states[t] = F @ filtered_states[t - 1]
+        predicted_covariances[t] = F @ filtered_covariances[t - 1] @ F.T + Q
+
+        # Update
+        innovation = measurements[t] - H @ predicted_states[t]
+        S = H @ predicted_covariances[t] @ H.T + R
+        K = predicted_covariances[t] @ H.T @ np.linalg.inv(S)
+        filtered_states[t] = predicted_states[t] + K @ innovation
+        filtered_covariances[t] = (
+            np.eye(n_dim_state, dtype=np.float64) - K @ H
+        ) @ predicted_covariances[t]
+
+    # Backward pass (RTS smoother)
+    smoothed_states = np.zeros_like(filtered_states)
+    smoothed_covariances = np.zeros_like(filtered_covariances)
+    smoothed_states[-1] = filtered_states[-1]
+    smoothed_covariances[-1] = filtered_covariances[-1]
+
+    for t in range(n_timesteps - 2, -1, -1):
+        C = filtered_covariances[t] @ F.T @ np.linalg.inv(predicted_covariances[t + 1])
+        smoothed_states[t] = filtered_states[t] + C @ (
+            smoothed_states[t + 1] - predicted_states[t + 1]
+        )
+        smoothed_covariances[t] = (
+            filtered_covariances[t]
+            + C @ (smoothed_covariances[t + 1] - predicted_covariances[t + 1]) @ C.T
+        )
+
+    return smoothed_states
+
+
+@nb.njit()
+def enforce_skeleton_constraints_numba(
+    data, skeleton_constraints, original_pos, tolerance=0.1, correction_factor=0.5
+):  # pragma: no cover
+    """
+    Adjusts the positions of body parts in each frame to ensure that the distances between connected parts
+    adhere to predefined skeleton constraints within a specified tolerance.
+
+    Args:
+        data (np.ndarray): Motion capture data, shape (n_frames, n_body_parts, 2).
+        skeleton_constraints (list): List of tuples (part1, part2, dist) defining the
+                                     constraints between body parts and their expected distances.
+        original_pos (np.ndarray): Boolean array indicating original (non-interpolated) positions,
+                                   shape (n_frames, n_body_parts, 2).
+        tolerance (float): Allowable deviation from the constraint distance (default: 0.1).
+        correction_factor (float): Factor to control the strength of position adjustments (default: 0.5).
+
+    Returns:
+        np.ndarray: Adjusted motion capture data with enforced skeleton constraints.
+
+    """
+    n_frames, _, _ = data.shape
+    for frame in range(n_frames):
+
+        if np.all(original_pos[frame, 
+                                0]):
+            continue  # Skip this frame
+
+        for part1, part2, dist in skeleton_constraints:
+            p1, p2 = data[frame, part1], data[frame, part2]
+            current_dist = np.sqrt(np.sum((p1 - p2) ** 2))
+            if current_dist > dist * (1 + tolerance) or current_dist < dist * (
+                1 - tolerance
+            ):
+                correction = (
+                    (current_dist - dist)
+                    / (2 * current_dist + 0.00001)
+                    * correction_factor
+                )
+                pm = (data[frame, part1] + data[frame, part2]) / 2
+                if original_pos[frame, part1][0]:
+                    data[frame, part2] += 2 * correction * (pm - p2)
+                elif original_pos[frame, part2][0]:
+                    data[frame, part1] += 2 * correction * (pm - p1)
+                else:
+                    data[frame, part1] += correction * (pm - p1)
+                    data[frame, part2] += correction * (pm - p2)
+    return data
+
+
+class MouseTrackingImputer:
+    """
+    A class for imputing and processing mouse tracking data.
+
+    This class provides methods for interpolating missing data points, enforcing skeleton
+    constraints, and smoothing trajectories in mouse tracking experiments.
+
+    Attributes:
+        n_iterations (int): Number of iterations for imputation (default: 10).
+        connectivity (object): Connectivity information for body parts.
+        full_imputation (bool): Whether to perform full imputation or only a partial linear imputation (default: False).
+        body_part_indices (OrderedDict): Mapping of body part names to indices.
+        skeleton_constraints (list): List of skeleton constraints.
+        mouse_body_estimation_samples (int): Number of sample frames with non-nan data to estimate valid mouse shapes (default: 100).
+        lin_interp_limit (int): Limit for linear interpolation (default: 3).
+    """
+
+    def __init__(self, n_iterations=10, connectivity=None, full_imputation=False):
+        self.full_imputation = full_imputation
+        self.n_iterations = n_iterations
+        self.connectivity = connectivity
+        self.body_part_indices = None
+        self.skeleton_constraints = None
+        self.mouse_body_estimation_samples = 100
+        self.lin_interp_limit = 3
+
+    def _initialize_constraints(self, data):
+        """
+        Initializes the body part constraints based on a sample of frames with complete mouse data
+
+        Args:
+            data (pd.DataFrame): Input tracking data.
+
+        Raises:
+            ValueError: If no complete frames are found in the data.
+        """
+        # Map body part names to indices
+        self.body_part_indices = OrderedDict()
+        for i, col in enumerate(data.columns):
+            body_part_name = col[0]
+            if body_part_name != "Row":
+                self.body_part_indices[body_part_name] = int(
+                    (i - 1) / 2
+                )  # workaround as "np.unique" changes sorting
+
+        # Find frames that contain no nans
+        complete_frames = []
+        for i, row in data.iterrows():
+            if not row.isna().any():
+                complete_frames.append(row)
+
+        if not complete_frames: # pragma: no cover
+            raise ValueError(
+                "No complete frames found in the data. Cannot initialize constraints."
+            )
+
+        # Sample a subset of complete frames
+        total_frames = len(complete_frames)
+        step = max(1, total_frames // self.mouse_body_estimation_samples)
+        sampled_frames = [complete_frames[i] for i in range(0, total_frames, step)]
+
+        # Generate skeleton constraints from average distance between sample of connected body parts
+        self.skeleton_constraints = []
+        for part1, connected_parts in self.connectivity.adj.items():
+            for part2 in connected_parts:
+                if part1 in self.body_part_indices and part2 in self.body_part_indices:
+                    idx1, idx2 = (
+                        self.body_part_indices[part1],
+                        self.body_part_indices[part2],
+                    )
+                    dists = [
+                        np.sqrt(
+                            np.sum(
+                                (
+                                    np.array([row[part1]["x"], row[part1]["y"]])
+                                    - np.array([row[part2]["x"], row[part2]["y"]])
+                                )
+                                ** 2
+                            )
+                        )
+                        for row in sampled_frames
+                    ]
+                    self.skeleton_constraints.append((idx1, idx2, np.mean(dists)))
+
+        assert len(self.skeleton_constraints) > 0, (
+            " None of the table headers and mouse connectivity dict entries did match during constraint initialization.\n"
+            " This usually happens if none or incorrect animal ids were given.\n"
+            " Please check if you provided the correct animal_ids as input for the Project."
+        )
+
+    @_suppress_warning(
+        ["A value is trying to be set on a copy of a slice from a DataFrame"]
+    )
+    def fit_transform(self, data):
+        """
+        Performs linear interpolation for small gaps and, if full_imputation is True
+        applies a multi-step imputation process for larger gaps.
+
+        Args:
+            data (pd.DataFrame): Input tracking data.
+
+        Returns:
+            np.ndarray: Processed tracking data.
+        """
+
+        # interpolate small gaps linearily
+        data.interpolate(
+            method="linear",
+            limit=self.lin_interp_limit,
+            limit_direction="both",
+            inplace=True,
+        )
+
+        # slow multi step imputation to also close larger gaps
+        if self.full_imputation and any((np.isnan(data.iloc[:, :])).any()):
+            if self.skeleton_constraints is None:
+                self._initialize_constraints(data)
+
+            # reshape to 3D numpy array for processing
+            reshaped_data = data.values.reshape(len(data), -1, 2)
+
+            # save non-missing position indices
+            original_pos = ~np.isnan(reshaped_data)
+
+            # get data rows with nans and neighboring rows as reference
+            nan_frames = [
+                (~original_pos[k, :]).any() for k in range(0, original_pos.shape[0])
+            ]
+            nan_frames = np.convolve(nan_frames, np.ones(15), mode="same") > 0
+            data_snippets = reshaped_data[nan_frames]
+            # print(f"{key} {np.sum(nan_frames)}")
+
+            # complete data with iterative imputation
+            completed_data = copy.copy(reshaped_data)
+            if data_snippets.shape[0] > 50:
+                completed_data[nan_frames] = self._iterative_imputation(data_snippets)
+            else:
+                completed_data = self._iterative_imputation(reshaped_data)
+            completed_data[original_pos] = reshaped_data[original_pos]
+
+            # smooth data
+            smoothed_data = self._kalman_smoothing(completed_data)
+            # fill back in original positions
+            smoothed_data[original_pos] = reshaped_data[original_pos]
+
+            # enforce skeleton constraints
+            constrained_data = enforce_skeleton_constraints_numba(
+                smoothed_data, self.skeleton_constraints, original_pos
+            )
+
+            return constrained_data.reshape(data.shape)
+        else:
+            return data
+
+    def _kalman_smoothing(self, data):
+        """
+        Apply Kalman smoothing to the tracking data. Uses a Rauch-Tung-Striebel (RTS) smoother
+        to smooth the trajectories of each body part coordinate.
+
+        Args:
+            data (np.ndarray): Input tracking data, shape (n_timesteps, n_body_parts, n_coords).
+
+        Returns:
+            np.ndarray: Smoothed tracking data.
+        """
+        _, n_body_parts, n_coords = data.shape
+
+        # Define model parameters (you may need to adjust these)
+        dt = 1.0  # time step
+        F = np.array([[1, dt], [0, 1]])  # State transition matrix
+        H = np.array([[1, 0]])  # Measurement matrix
+        Q = (
+            np.array([[0.25 * dt**4, 0.5 * dt**3], [0.5 * dt**3, dt**2]]) * 0.01
+        )  # Process noise covariance
+        R = np.array([[0.1]])  # Measurement noise covariance
+
+        smoothed_data = np.zeros_like(data)
+
+        for bp in range(n_body_parts):
+            for coord in range(n_coords):
+                measurements = data[:, bp, coord].reshape(-1, 1)
+                smoothed_states = rts_smoother_numba(measurements, F, H, Q, R)
+                smoothed_data[:, bp, coord] = smoothed_states[:, 0]
+
+        return smoothed_data
+
+    @_suppress_warning(["Early stopping criterion not reached."])
+    def _iterative_imputation(self, data):
+        """
+        Perform iterative imputation on the tracking data usingses scikit-learn's IterativeImputer
+        to fill in missing values in the data.
+
+        Args:
+            data (np.ndarray): Input tracking data.
+
+        Returns:
+            np.ndarray: Imputed tracking data.
+        """
+
+        # reshape data for imputation
+        scaler = StandardScaler()
+        original_shape = data.shape
+        to_impute = data.reshape(*data.shape[:-2], -1)
+
+        # scale and impute
+        imputed = IterativeImputer(
+            skip_complete=True,
+            max_iter=100,
+            n_nearest_features=8,
+            tol=1e-1,
+        ).fit_transform(scaler.fit_transform(to_impute))
+
+        # undo scaling
+        imputed = scaler.inverse_transform(imputed)
+        data = imputed.reshape(original_shape)
+        return data
+
+
+def connect_mouse(
+    animal_ids=None, exclude_bodyparts: list = None, graph_preset: str = "deepof_14"
+) -> nx.Graph:
+    """Create a nx.Graph object with the connectivity of the bodyparts in the DLC topview model for a single mouse.
+
+    Used later for angle computing, among others.
+
+    Args:
+        animal_ids (str): if more than one animal is tagged, specify the animal identyfier as a string.
+        exclude_bodyparts (list): Remove the specified nodes from the graph.
+        graph_preset (str): Connectivity preset to use. Currently supported: "deepof_14", "deepof_11"  and "deepof_8".
+
+    Returns:
+        connectivity (nx.Graph)
+
+    """
+    if animal_ids is None:
+        animal_ids = [""]
+    if not isinstance(animal_ids, list):
+        animal_ids = [animal_ids]
+
+    connectivities = []
+
+    for animal_id in animal_ids:
+        try:
+            connectivity_dict = {
+                "deepof_14": {
+                    "Nose": ["Left_ear", "Right_ear"],
+                    "Spine_1": ["Center", "Left_ear", "Right_ear"],
+                    "Center": ["Left_fhip", "Right_fhip", "Spine_2"],
+                    "Spine_2": ["Left_bhip", "Right_bhip", "Tail_base"],
+                    "Tail_base": ["Tail_1"],
+                    "Tail_1": ["Tail_2"],
+                    "Tail_2": ["Tail_tip"],
+                },
+                "deepof_11": {
+                    "Nose": ["Left_ear", "Right_ear"],
+                    "Spine_1": ["Center", "Left_ear", "Right_ear"],
+                    "Center": ["Left_fhip", "Right_fhip", "Spine_2"],
+                    "Spine_2": ["Left_bhip", "Right_bhip", "Tail_base"],
+                },
+                "deepof_8": {
+                    "Nose": ["Left_ear", "Right_ear"],
+                    "Center": [
+                        "Left_fhip",
+                        "Right_fhip",
+                        "Tail_base",
+                        "Left_ear",
+                        "Right_ear",
+                    ],
+                    "Tail_base": ["Tail_tip"],
+                },
+            }
+            connectivity = nx.Graph(connectivity_dict[graph_preset])
+        except TypeError:
+            connectivity = nx.Graph(graph_preset)
+
+        if animal_id:
+            mapping = {
+                node: "{}_{}".format(animal_id, node) for node in connectivity.nodes()
+            }
+            if exclude_bodyparts is not None:
+                exclude = ["{}_{}".format(animal_id, exc) for exc in exclude_bodyparts]
+            nx.relabel_nodes(connectivity, mapping, copy=False)
+        else:
+            exclude = exclude_bodyparts
+
+        if exclude_bodyparts is not None:
+            connectivity.remove_nodes_from(exclude)
+
+        connectivities.append(connectivity)
+
+    if len(connectivities) > 1:
+        pass
+
+    final_graph = connectivities[0]
+    for g in range(1, len(connectivities)):
+        final_graph = nx.compose(final_graph, connectivities[g])
+
+    for a, b in combinations(animal_ids, 2):
+        final_graph.add_edge(
+            "{}_Nose".format(a), "{}_Nose".format(b)
+        )
+        final_graph.add_edge(
+            "{}_Tail_base".format(a),
+            "{}_Tail_base".format(b),
+        )
+        final_graph.add_edge(
+            "{}_Nose".format(a), "{}_Tail_base".format(b)
+        )
+        final_graph.add_edge(
+            "{}_Nose".format(b), "{}_Tail_base".format(a)
+        )
+
+    return final_graph
+
+
+# Candidate for removal or rework as it is part of a basically unused preprocessing pathway
+def edges_to_weighted_adj(adj: np.ndarray, edges: np.ndarray): # pragma: no cover
+    """Convert an edge feature matrix to a weighted adjacency matrix.
+
+    Args:
+        - adj (np.ndarray): binary adjacency matrix of the current graph.
+        - edges (np.ndarray): edge feature matrix. Last two axes should be of shape nodes x features.
+
+    """
+    adj = np.repeat(np.expand_dims(adj.astype(float), axis=0), edges.shape[0], axis=0)
+    if len(edges.shape) == 3:
+        adj = np.repeat(np.expand_dims(adj, axis=1), edges.shape[1], axis=1)
+
+    adj[np.where(adj)] = np.concatenate([edges, edges[:, ::-1]], axis=-2).flatten()
+
+    return adj
+
+
+def enumerate_all_bridges(G: nx.graph) -> list:
+    """Enumerate all 3-node connected sequences in the given graph.
+
+    Args:
+        - G (nx.graph): Animal connectivity graph.
+
+    Returns:
+        bridges (list): List with all 3-node connected sequences in the provided graph.
+
+    """
+    degrees = dict(nx.degree(G))
+    centers = [node for node in degrees.keys() if degrees[node] >= 2]
+
+    bridges = []
+    for center in centers:
+        for comb in list(combinations(list(G[center].keys()), 2)):
+            bridges.append([comb[0], center, comb[1]])
+
+    return bridges
+
+
+# QUALITY CONTROL AND PREPROCESSING #
+
+
+def str2bool(v: str) -> bool:
+    """
+
+    Return the passed string as a boolean.
+
+    Args:
+        v (str): String to transform to boolean value.
+
+    Returns:
+        bool: If conversion is not possible, it raises an error
+
+    """
+    if isinstance(v, bool):
+        return v  # pragma: no cover
+    elif v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    raise argparse.ArgumentTypeError("Boolean compatible value expected.") # pragma: no cover
+
+
+def compute_animal_presence_mask(
+    quality: table_dict, threshold: float = 0.5
+) -> table_dict:
+    """Compute a mask of the animal presence in the video.
+
+    Args:
+        quality (table_dict): Dictionary with the quality of the tracking for each body part and animal.
+        threshold (float): Threshold for the quality of the tracking. If the quality is below this threshold, the animal is considered to be absent.
+
+    Returns:
+        animal_presence_mask (table_dict): Dictionary with the animal presence mask for each bodypart and animal.
+
+    """
+    animal_presence_mask = {}
+
+    for exp in quality.keys():
+        animal_presence_mask[exp] = {}
+        for animal_id in quality._animal_ids:
+            animal_presence_mask[exp][animal_id] = (
+                quality.filter_id(animal_id)[exp].median(axis=1) > threshold
+            ).astype(int)
+
+        animal_presence_mask[exp] = pd.DataFrame(animal_presence_mask[exp])
+
+    return deepof.data.TableDict(
+        animal_presence_mask, typ="animal_presence_mask", table_path=quality._table_path, animal_ids=quality._animal_ids
+    )
+
+
+def iterative_imputation(
+    project: project, tab_dict: dict, lik_dict: dict, full_imputation: bool = False,
+):
+    """Perform iterative imputation on occluded body parts. Run per animal and experiment.
+
+    Args:
+        project (project): Project object.
+        tab_dict (dict): Dictionary with the coordinates of the body parts.
+        lik_dict (dict): Dictionary with the likelihood of the tracking for each body part and animal.
+        full_imputation (bool): Determines if only small gaps get linearily imputed (False) or additionally IterativeImputer and a few other steps are executed to close all gaps (True)
+
+    Returns:
+        tab_dict (dict): Dictionary with the coordinates of the body parts after imputation.
+
+    """
+    presence_masks = compute_animal_presence_mask(lik_dict)
+    table_path=os.path.join(project.project_path, project.project_name, "Tables")
+    tab_dict = deepof.data.TableDict(
+        tab_dict, typ="coords", table_path=table_path, animal_ids=project.animal_ids
+    )
+    imputed_tabs = copy.deepcopy(tab_dict)
+
+    for animal_id in project.animal_ids:
+
+        for k, tab in tab_dict.filter_id(animal_id).items():
+
+            try:
+
+                # get table for current animal
+                sub_table = copy.copy(tab.iloc[np.where(presence_masks[k][animal_id].values)[0]])
+                # add row number info (twice as it makes things easier later when splitting in x and y)
+                sub_table.insert(
+                    0, ("Row", "x"), np.where(presence_masks[k][animal_id].values)[0]
+                )
+                sub_table.insert(
+                    0, ("Row", "y"), np.where(presence_masks[k][animal_id].values)[0]
+                )
+
+                # impute missing values
+                imputer = MouseTrackingImputer(
+                    n_iterations=5,
+                    connectivity=project.connectivity[animal_id],
+                    full_imputation=full_imputation,
+                )
+                imputed = imputer.fit_transform(sub_table)
+
+                # reshape back to original format and update values
+                imputed = pd.DataFrame(
+                    imputed,
+                    index=sub_table.index,
+                    columns=sub_table.columns,
+                )
+                imputed = imputed.drop(("Row", "x"), axis=1)
+                imputed = imputed.drop(("Row", "y"), axis=1)
+                imputed_tabs[k].update(imputed)
+
+                if tab.shape[1] != imputed.shape[1]: # pragma: no cover
+                    warnings.warn(
+                        "Some of the body parts have zero measurements. Iterative imputation skips these,"
+                        " which could bring problems downstream. A possible solution could be to refine "
+                        "DLC tracklets."
+                    )
+
+            except ValueError: # pragma: no cover
+                warnings.warn(
+                    f"Animal {animal_id} in experiment {k} has not enough data. Skipping imputation."
+                )
+
+    return imputed_tabs
+
+
+def set_missing_animals(
+    coordinates: project, tab_dict: dict, lik_dict: dict, animal_ids: list = None
+):
+    """Set the coordinates of the missing animals to NaN.
+
+    Args:
+        coordinates (project): Project object.
+        tab_dict (dict): Dictionary with the coordinates of the body parts.
+        lik_dict (dict): Dictionary with the likelihood of the tracking for each body part and animal.
+        animal_ids (list): List with the animal ids to remove. If None, all the animals with missing data are processed.
+
+    Returns:
+        tab_dict (dict): Dictionary with the coordinates of the body parts after removing missing animals.
+
+    """
+    try:
+        if animal_ids is None:
+            animal_ids = coordinates.animal_ids
+        table_path=os.path.join(coordinates.project_path, coordinates.project_name, "Tables")
+    except AttributeError:
+        if animal_ids is None:
+            animal_ids = coordinates._animal_ids
+        table_path=os.path.join(coordinates._project_path, coordinates._project_name, "Tables")
+
+    presence_masks = compute_animal_presence_mask(lik_dict)
+    tab_dict = deepof.data.TableDict(tab_dict, typ="qc", table_path=table_path, animal_ids=animal_ids)
+
+    for animal_id in animal_ids:
+        for k, tab in tab_dict.filter_id(animal_id).items():
+            try:
+                missing_times = tab[np.array(presence_masks[k][animal_id] == 0)]
+            except KeyError:
+                missing_times = tab[
+                    np.array(presence_masks[k].sum(axis=1) < (len(animal_ids) - 1))
+                ]
+
+            tab_dict[k].loc[missing_times.index, missing_times.columns] = np.nan
+
+    return tab_dict
+
+
+def time_to_seconds(time_string: str) -> float:
+    """Compute seconds as float based on a time string.
+
+    Args:
+        time_string (str): time string as input (format HH:MM:SS or HH:MM:SS.SSS...).
+
+    Returns:
+        seconds (float): time in seconds
+    """
+    seconds = None
+    if re.match(r"^\b\d{1,6}:\d{1,6}:\d{1,6}(?:\.\d{1,9})?$", time_string) is not None:
+        time_array = np.array(re.findall(r"[-+]?\d*\.?\d+", time_string)).astype(float)
+        seconds = 3600 * time_array[0] + 60 * time_array[1] + time_array[2]
+        seconds=np.round(seconds * 10**9) / 10**9
+
+    return seconds
+
+
+def seconds_to_time(seconds: float, cut_milliseconds: bool = True) -> str:
+    """Compute a time string based on seconds as float.
+
+    Args:
+        seconds (float): time in seconds
+        cut_milliseconds (bool): decides if milliseconds should be part of the output, defaults to True
+
+    Returns:
+        time_string (str): time string (format HH:MM:SS or HH:MM:SS.SSS...)
+    """
+    time_string = None
+    _hours = np.floor(seconds / 3600)
+    _minutes = np.floor((seconds - _hours * 3600) / 60)
+    _seconds = np.floor((seconds - _hours * 3600 - _minutes * 60))
+    _milli_seconds = seconds - np.floor(seconds)
+
+    if cut_milliseconds:
+        time_string = f"{int(_hours):02d}:{int(_minutes):02d}:{int(_seconds):02d}"
+    else:
+        time_string = f"{int(_hours):02d}:{int(_minutes):02d}:{int(_seconds):02d}.{int(np.round(_milli_seconds*10**9)):09d}"
+        l_max = time_string.find(".") + 10
+        time_string = time_string[0:l_max]
+
+    return time_string
+
+
+def _load_conditions_csv(filepath):
+    """Loads condition objects (experiment conditions, start markers) from a csv file"""
+    exp_conditions = pd.read_csv(filepath, index_col=0)
+    exp_conditions = {
+        exp_id: pd.DataFrame(
+            exp_conditions.loc[exp_conditions.iloc[:, 0] == exp_id, :].iloc[0, 1:]
+        ).T
+        for exp_id in exp_conditions.iloc[:, 0]
+    }
+    for key in exp_conditions.keys():
+        assert isinstance(exp_conditions[key], pd.DataFrame) and exp_conditions[key].shape[0]==1, "Conditions could not be loaded!"
+    return exp_conditions
+
+
+def load_exp_conditions(filepath: str):
+    
+    exp_conditions = _load_conditions_csv(filepath)
+    # some validity checks
+    for key in exp_conditions.keys():
+        for condition in exp_conditions[key].columns:
+            condition_instance=exp_conditions[key][condition].iloc[0]
+            assert isinstance(condition_instance, str), "Condition values need to be strings!"  
+    return exp_conditions
+
+
+def load_start_markers(filepath, frame_rate): 
+    """Load start markers analogous to experimental conditions and do some checks"""
+    start_markers = _load_conditions_csv(filepath)
+    # some validity checks
+    for key in start_markers.keys():
+        for marker in start_markers[key].columns:
+            raw = copy.copy(start_markers[key][marker].iloc[0])
+            # clean quotes
+            if isinstance(raw, str):
+                start_point = raw.strip().strip('"').strip("'")
+            else:
+                start_point = raw
+            # validate allowed types    
+            is_frame = isinstance(start_point, (int, np.integer))
+            is_time = isinstance(start_point, str) and re.fullmatch(
+                r"\d{1,6}:\d{1,6}:\d{1,6}(?:\.\d{1,9})?",
+                start_point
+            ) is not None
+            # Convert to uniform time format
+            if is_frame:
+                start_point = seconds_to_time(start_point/frame_rate, cut_milliseconds=False)
+            
+            assert (is_frame or is_time),'Start markers need to be either integers for frames or deepOF time points (format "xx:xx:xx.xxx")!'
+            
+            start_markers[key][marker].iloc[0] = start_point
+    return start_markers
+
+
+def bp2polar(tab: pd.DataFrame) -> pd.DataFrame:
+    """Return the DataFrame in polar coordinates.
+
+    Args:
+        tab (pandas.DataFrame): Table with cartesian coordinates.
+
+    Returns:
+        polar (pandas.DataFrame): Equivalent to input, but with values in polar coordinates.
+
+    """
+    tab_ = np.array(tab)
+    if len(tab_.shape)==1:
+        tab_ = tab_.reshape(1, -1)
+    complex_ = tab_[:, 0] + 1j * tab_[:, 1]
+    polar = pd.DataFrame(np.array([abs(complex_), np.angle(complex_)]).T)
+    polar.rename(columns={0: "rho", 1: "phi"}, inplace=True)
+    return polar
+
+
+def tab2polar(cartesian_df: pd.DataFrame) -> pd.DataFrame:
+    """Return a pandas.DataFrame in which all the coordinates are polar.
+
+    Args:
+        cartesian_df (pandas.DataFrame): DataFrame containing tables with cartesian coordinates.
+
+    Returns:
+        result (pandas.DataFrame): Equivalent to input, but with values in polar coordinates.
+
+    """
+    original_shape = cartesian_df.shape
+    if type(cartesian_df.columns) == pd.MultiIndex:
+        #"levels" seems to be bugged and still finds columns that are not included in the datframe anymore
+        body_parts = [column[0] for column in cartesian_df.columns]
+        body_parts = np.array(body_parts)[np.unique(body_parts, return_index=True)[1]]
+    else:
+        body_parts = cartesian_df.columns
+
+    result = []
+    for df in list(body_parts):
+        result.append(bp2polar(cartesian_df[df]))
+    result = pd.concat(result, axis=1)
+    idx = pd.MultiIndex.from_product(
+        [list(body_parts), ["rho", "phi"]]
+    )
+    result.columns = idx
+    result.index = cartesian_df.index
+    return result
+
+
+def compute_dist(
+    pair_array: np.array
+) -> pd.DataFrame:
+    """Return a pandas.DataFrame with the scaled distances between a pair of body parts.
+
+    Args:
+        pair_array (numpy.array): np.array of shape N * 4 containing X, y positions over time for a given pair of body parts.
+
+    Returns:
+        result (pd.DataFrame): pandas.DataFrame with the absolute distances between a pair of body parts.
+
+    """
+    lim = 2 if pair_array.shape[1] == 4 else 1
+    a, b = pair_array[:, :lim], pair_array[:, lim:]
+    ab = a - b
+
+    #calculate euclidean distance fast
+    dist = np.sqrt(np.einsum("...i,...i", ab, ab))
+    return pd.DataFrame(dist) 
+
+
+def bpart_distance(
+    dataframe: pd.DataFrame, bit_precision: BitPrecision = BitPrecision.f64,
+) -> pd.DataFrame:
+    """Return a pandas.DataFrame with the scaled distances between all pairs of body parts.
+
+    Args:
+        dataframe (pandas.DataFrame): pd.DataFrame of shape N*(2*bp) containing X,y positions over time for a given set of bp body parts.
+
+    Returns:
+        result (pd.DataFrame): pandas.DataFrame with the absolute distances between all pairs of body parts.
+
+    """
+    indexes = combinations(dataframe.columns.levels[0], 2)
+    dists = []
+    for idx in indexes:
+        dist = compute_dist(np.array(dataframe.loc[:, list(idx)], dtype=bit_precision.dtype))
+        dist.columns = [idx]
+        dists.append(dist)
+
+    return pd.concat(dists, axis=1)
+
+
+def angle(bpart_array: np.array, bit_precision: BitPrecision = BitPrecision.f64,) -> np.array:
+    """Return a numpy.ndarray with the angles between the provided instances.
+
+    Args:
+        bpart_array (numpy.array): 2D positions over time for a bodypart.
+
+    Returns:
+        ang (np.array): 1D angles between the three-point-instances.
+
+    """
+    a, b, c = bpart_array
+
+    ba = a - b
+    bc = c - b
+
+    cosine_angle = np.einsum("...i,...i", ba, bc) / (
+        np.linalg.norm(ba, axis=1) * np.linalg.norm(bc, axis=1)
+    )
+    #restrict to valid range
+    cosine_angle=np.clip(cosine_angle, -1, 1)
+
+    ang = np.arccos(cosine_angle, dtype=bit_precision.dtype)
+
+    return ang
+
+
+def signed_angle(bpart_array: np.array) -> np.array:
+    """Return a numpy.ndarray with the signed angles between the provided instances.
+
+    Args:
+        bpart_array (numpy.array): 2D positions over time for a bodypart.
+
+    Returns:
+        ang (np.array): 1D angles between the three-point-instances.
+
+    """
+    a, b, c = bpart_array
+
+    ab = a - b
+    bc = c - b 
+    
+    dot = (ab * bc).sum(-1)
+
+    det = ab[..., 0] * bc[..., 1] - ab[..., 1] * bc[..., 0]
+    theta = np.arctan2(det, dot)          # (-π, π]
+    ang_sin = np.sin(theta)             # [-1, 1]
+    ang_cos = np.cos(theta)             # [-1, 1]
+
+    return np.stack([ang_sin,ang_cos],axis=1)
+
+
+def compute_areas(polygon_xy_stack: np.array) -> np.array:
+    """Compute polygon areas for the provided stack of sets of data point-xy coordinates.
+
+    Args:
+        polygon_xy_stack: 3D numpy array [NPolygons (i.e. NFrames), Npoints, NDim (x,y)]
+
+    Returns:
+        areas (np.ndarray): areas for the provided xy coordinates.
+
+    """
+
+    # list of polygon areas, a list entry is set to np.nan if points forming the respective polygon are missing
+    polygon_areas = np.array(
+        [
+            Polygon(polygon_xy_stack[i]).area
+            if not np.isnan(polygon_xy_stack[i]).any()
+            else np.nan
+            for i in range(len(polygon_xy_stack))
+        ]
+    )
+
+    return polygon_areas
+
+
+@nb.njit(parallel=True)
+def compute_areas_numba(polygon_xy_stack: np.array) -> np.array:  # pragma: no cover
+    """
+    Compute polygon areas for the provided stack of sets of data point-xy coordinates.
+
+    Args:
+        polygon_xy_stack (np.ndarray): 3D numpy array [NPolygons (i.e. NFrames), Npoints, NDim (x,y)]
+
+    Returns:
+        areas (np.ndarray): areas for the provided xy coordinates.
+
+    """
+    n_polygons, n_vertices, n_dims = polygon_xy_stack.shape
+    polygon_areas = np.zeros(n_polygons, dtype=np.float64)
+
+    for i in np.arange(n_polygons):
+        polygon_areas[i] = polygon_area_numba(polygon_xy_stack[i])
+
+    return polygon_areas
+
+
+@nb.njit()
+def polygon_area_numba(vertices: np.ndarray) -> float:  # pragma: no cover
+    """
+    Calculate the area of a single polygon given its vertices.
+
+    Args:
+        vertices (np.ndarray): Array of shape [Npoints, 2] containing the (x, y) coordinates of the polygon's vertices.
+
+    Returns:
+        float: Area of the polygon.
+    """
+    n = len(vertices)
+    area = 0.0
+
+    for i in range(n):
+        j = (i + 1) % n
+        area += vertices[i, 0] * vertices[j, 1]
+        area -= vertices[j, 0] * vertices[i, 1]
+
+    area = abs(area) / 2
+
+    return area
+
+
+@nb.njit()
+def extend_behaviors_numba(
+    behaviors: np.ndarray,
+    delta_T: float = 2.0,
+    frame_rate: float = 1,
+) -> np.ndarray: # pragma: no cover
+    """
+    Takes a booelan array of behavior detections and extends each behavior detection by delta_T.
+
+    Args:
+        behaviors (np.ndarray): Boolean array of shape [N_behaviors, N_frames] containing the detection results (True / False) of each behavior for each frame.
+        delta_T: Time by which each behavior should be expanded
+        frame_rate (float): Frame rate of the corresponding project
+
+    Returns:
+        extended_behaviors (np.ndarray): Boolean array of shape [N_behaviors, N_frames] containing the detection results (True / False) of each behavior for each frame after extension.
+    """
+    
+    # Inits
+    delta_T_frames = int(frame_rate * delta_T)
+    n_behaviors, n_frames = behaviors.shape
+    extended_behaviors = behaviors.copy()
+    
+    # Iterate over all behaviors
+    for i in range(n_behaviors):
+        
+        # Determine behavior offset positions
+        behavior = extended_behaviors[i]
+        on_and_offsets = np.zeros(n_frames, dtype=np.int8)
+        current_behavior = behavior.astype(np.int8)
+        on_and_offsets[1:] = np.diff(current_behavior)  
+        offset_pos = np.where(on_and_offsets == -1)[0]
+        
+        # Extend behavior instances by delta_T_frames at their offset positions
+        for offset in offset_pos:
+            end = min(offset + delta_T_frames, n_frames)
+            behavior[offset:end] = 1
+    
+    return extended_behaviors
+
+
+def _compute_transition_matrices(
+    extended_behaviors: np.ndarray,
+    *,
+    frame_rate: float,
+    diagonal_behavior_counting: str,
+    normalize_events: bool,
+):
+    """
+    Compute transition association matrix (and optional paired events) from extended behaviors.
+
+    Args:
+        extended_behaviors: shape (n_behaviors, T) binary array after extend_behaviors_numba.
+        frame_rate: frames per second.
+        diagonal_behavior_counting: mode passed to count_events for i==j.
+        normalize_events: if True, also compute paired_events matrix.
+
+    Returns:
+        associations: (n_behaviors, n_behaviors)
+        paired_events: (n_behaviors, n_behaviors) or zeros if normalize_events=False
+    """
+    n_beh = extended_behaviors.shape[0]
+    L = extended_behaviors.shape[1]
+
+    associations = np.zeros((n_beh, n_beh), dtype=float)
+    paired_events = np.zeros((n_beh, n_beh), dtype=float)
+
+    for i in range(n_beh):
+        for j in range(n_beh):
+            if i == j:
+                associations[i, j] = count_events(
+                    extended_behaviors[i, :],
+                    counting_mode=diagonal_behavior_counting,
+                    frame_rate=frame_rate,
+                )
+            else:
+                preceding_active = extended_behaviors[i, :]
+                proximate_active = extended_behaviors[j, :]
+
+                proximate_onsets = np.zeros(L, dtype=np.int8)
+                proximate_onsets[:-1] = np.diff(proximate_active.astype(np.int8))
+                prox_onset_pos = np.where(proximate_onsets == 1)[0]
+
+                associations[i, j] = np.sum(preceding_active[prox_onset_pos])
+
+            if normalize_events:
+                paired_events[i, j] = (
+                    count_events(extended_behaviors[i, :], counting_mode="Events", frame_rate=frame_rate)
+                    + count_events(extended_behaviors[j, :], counting_mode="Events", frame_rate=frame_rate)
+                )
+
+    return associations, paired_events
+    
+      
+def count_transitions(
+    tab_dict: table_dict,
+    exp_conditions: dict,
+    bin_info: dict = None,
+    animals_in_roi: list = None,
+    delta_T: float = 0.5,
+    frame_rate: float = 1,
+    silence_diagonal: bool = False,
+    aggregate: str = True,
+    normalize: str = True,
+    diagonal_behavior_counting: str = "Transitions",
+    custom_continuous_behavior_names: list = [],
+):
+    """
+    Count transitions between successive behaviors for all experiments in tab_dict.
+
+    Args:
+        tab_dict (table_dict): Dictionary with behavior data (supervised or unsupervised soft_counts)
+        exp_conditions (dict): Dictionary containg the experiment conditions for each experiment.
+        bin_info (dict): dictionary containing indices to plot for all experiments
+        animals_in_roi (list): List of ids of the animals that need to be inside of the active ROI. All frames in which any of the given animals are not inside of the ROI get excluded                                                  
+        delta_T: Time after the offset of one behavior during which the onset of the next behavior counts as a transition      
+        frame_rate (float): Frame rate of the corresponding project
+        silence_diagonal (bool): If True, diagonals are set to zero.
+        aggregate (bool): If True, sums matrices per experimental condition; else per experiment.
+        normalize (bool): Row-normalizes transition probabilities if True. Default=True.
+        diagonal_behavior_counting (str): How to count diagonals (self-transitions). Options: 
+            - "Frames": Total frames where behavior is active (after extension)
+            - "Time": Total time where behavior is active
+            - "Events": number of instances of the behavior occuring 
+            - "Transitions": number of frame-wise internal behavior transitions e.g. A behavior of 4 frames in length would have 3 transitions.
+        custom_continuous_behavior_names (list): list of potentially added names of custom continuous behaviors (should get sorted out)
+
+    Returns:
+        transitions_dict (dict): Dictionary of transition matrices. Keys:
+            - If aggregate=True: Condition labels (e.g., {'control': array(...)})
+            - If aggregate=False: Experiment IDs (e.g., {'exp1': array(...)})
+        columns (list): Behavior names (columns after dropping non-binary features).
+        combined_columns (list): All possible behavior transition pairs (e.g., ['BehaviorA-x-BehaviorB', ...]).
+
+    """
+    # create tabdict dictionary to iterate over options
+    load_range = None
+
+    transitions_dict = {}
+    paired_events_dict = {}
+    normalize_events = False
+
+    # Determine normalization method based on table type (pandas = supervised)
+    is_pandas_table=get_dt(tab_dict,list(tab_dict.keys())[0],only_metainfo=True).get('columns') is not None
+    normalize_events=False
+    if is_pandas_table and normalize:
+        normalize_events=True           
+    for z, key in enumerate(tab_dict.keys()):
+
+        columns = None
+        # for each tab, first cut tab in requested shape based on bin_info
+        if bin_info is not None:
+            load_range = bin_info[key]["time"]
+            if len(bin_info[key]) > 1:
+                load_range=get_behavior_frames_in_roi(None,bin_info[key],animals_in_roi)
+        # Create empty tab, in case load range does not contain any valid frames
+        if load_range is not None and len(load_range)==0:
+            meta_info = get_dt(tab_dict,key,only_metainfo=True)
+            tab = np.zeros([1,meta_info["num_cols"]])
+            if "columns" in meta_info:
+                columns = meta_info["columns"]
+        else:
+            tab = get_dt(tab_dict,key,load_range=load_range)
+        # skip non-binary columns (e.g. speed column)
+        
+        # in case tab is a numpy array (soft_counts), transform numpy array in analogous pandas datatable
+        if isinstance(tab,np.ndarray):
+            max_indices = tab.argmax(axis=1)
+            tab_soft = np.zeros_like(tab, dtype=int)
+            tab_soft[np.arange(tab.shape[0]), max_indices] = 1 # set maximum column to 1 for each row
+            if columns is None:
+                columns = [f"Cluster_{i}" for i in range(tab_soft.shape[1])] #create useful column names
+            tab=pd.DataFrame(tab_soft, columns=columns)
+        else:
+            columns = tab.columns
+        
+        # Drop non-binary columns (e.g. speed column in supervised)
+        for col in columns:
+            if col.endswith(tuple(CONTINUOUS_BEHAVIORS+custom_continuous_behavior_names)):
+                tab=tab.drop(columns=[col])
+
+        # Update columns
+        columns = tab.columns
+
+        tab_numpy=np.nan_to_num(tab.to_numpy().T)
+        extended_behaviors=extend_behaviors_numba(tab_numpy,delta_T,frame_rate)
+        L = extended_behaviors.shape[1]
+
+        if z==0 and aggregate: 
+            for exp_cond in set(exp_conditions.values()):
+                transitions_dict[exp_cond] = np.zeros([tab.shape[1], tab.shape[1]])
+                paired_events_dict[exp_cond] = np.zeros([tab.shape[1], tab.shape[1]])
+
+        combined_columns = [f"{var_i}-x-{var_j}" for var_i in columns for var_j in columns]
+
+        associations, paired_events = _compute_transition_matrices(
+            extended_behaviors,
+            frame_rate=frame_rate,
+            diagonal_behavior_counting=diagonal_behavior_counting,
+            normalize_events=normalize_events,
+        )
+
+        if silence_diagonal:
+            np.fill_diagonal(associations, 0)
+
+
+        # Aggregate based on experimental condition if specified
+        if aggregate:
+            exp_cond=exp_conditions[key]
+            transitions_dict[exp_cond] += associations
+            paired_events_dict[exp_cond] += paired_events
+        else:
+            transitions_dict[key] = associations
+            paired_events_dict[key] = paired_events    
+        
+    # Normalize rows if specified
+    if normalize and not normalize_events:
+
+        transitions_dict = {
+            key: np.nan_to_num(value.astype(float) / value.astype(float).sum(axis=1)[:, np.newaxis])
+            for key, value in transitions_dict.items()
+        } 
+    elif normalize_events:
+
+        transitions_dict = {
+            key: np.nan_to_num(value.astype(float) / (paired_events_dict[key]-1))
+            for key, value in transitions_dict.items()
+        } 
+             
+    return transitions_dict, columns, combined_columns
+
+
+def count_events(binary_behavior: np.ndarray, counting_mode: str = "Events", frame_rate: int = 1) -> int:
+    """Counts the number of continuous blocks of 1s in a binary behavior vector in different ways
+    
+    Args:
+        binary_behavior (numpy.ndarray): Binary 1D Array containing behavior detections.
+        counting_mode (str): Counting mode. Options are:
+        - "Frames": Counts total number of frames in all events
+        - "Time": Counts total time duration of all events (requires frame_rare input)
+        - "Events": Counts number of continuous blocks of 1s
+        - "Transitions": Counts number of frame-to-frame transitions within the events e.g. an event of 10 frames in length would have 9 transitions.
+        frame_rate (float): Frame rate of the recording.
+
+    Returns:
+        num_events (float): counted events
+    """
+    
+    # Counts total number of frames in all events
+    if counting_mode == "Frames":
+        num_events= np.sum(binary_behavior)
+    # Counts total time duration of all events
+    elif counting_mode == "Time":
+        num_events= np.sum(binary_behavior)/frame_rate
+    # Counts number of continuous blocks of 1s
+    elif counting_mode == "Events":
+        L = len(binary_behavior)
+        behavior_onsets = np.zeros(L, dtype=np.int8)
+        behavior_onsets[:-1] = np.diff(binary_behavior.astype(np.int8))
+        behavior_onset_pos = np.where(behavior_onsets == 1)[0]
+        num_events=len(behavior_onset_pos)
+        if L>0 and binary_behavior[0].astype(np.int8)==1:
+            num_events=num_events+1
+    # Counts number of frame-to-frame transitions within the events
+    elif counting_mode == "Transitions":
+        prev = np.array(binary_behavior[:-1])
+        curr = np.array(binary_behavior[1:])
+        num_events= np.sum((prev == 1) & (curr == 1))
+
+    return num_events
+
+
+def rotate(
+    p: np.array, angles: np.array, origin: np.array = np.array([0, 0])
+) -> np.array:
+    """Return a 2D numpy.ndarray with the initial values rotated by angles radians.
+
+    Args:
+        p (numpy.ndarray): 2D Array containing positions of bodyparts over time.
+        angles (numpy.ndarray): Set of angles (in radians) to rotate p with.
+        origin (numpy.ndarray): Rotation axis (zero vector by default).
+
+    Returns:
+        - rotated (numpy.ndarray): rotated positions over time
+
+    """
+    R = np.array([[np.cos(angles), -np.sin(angles)], [np.sin(angles), np.cos(angles)]])
+
+    o = np.atleast_2d(origin)
+    p = np.atleast_2d(p)
+
+    rotated = np.squeeze((R @ (p.T - o.T) + o.T).T)
+
+    return rotated
+
+
+@nb.njit(parallel=True)
+def rotate_all_numba(data: np.array, angles: np.array) -> np.array:  # pragma: no cover
+    """Rotates Return a 2D numpy.ndarray with the initial values rotated by angles radians.
+
+    Args:
+        p (numpy.ndarray): 2D Array containing positions of bodyparts over time.
+        angles (numpy.ndarray): Set of angles (in radians) to rotate p with.
+
+    Returns:
+        - rotated (numpy.ndarray): rotated positions over time
+
+    """
+
+    # initializations
+    aligned_trajs = np.zeros(data.shape)
+    new_shape = (data.shape[1] // 2, 2)
+    rotated_frame = np.empty(new_shape, dtype=np.float64)
+    reshaped_frame = np.empty(new_shape, dtype=np.float64)
+
+    for frame in range(data.shape[0]):
+
+        # reshape [x1,y1,x2,y2,...] to [[x1,y1],[x1,y2],...]
+        for i in range(new_shape[0]):
+            reshaped_frame[i, 0] = data[frame][2 * i]
+            reshaped_frame[i, 1] = data[frame][2 * i + 1]
+
+        # rotate frame
+        rotated_frame = rotate_numba(reshaped_frame, angles[frame])
+
+        # undo reshaping
+        for i in range(new_shape[0]):
+            for j in range(new_shape[1]):
+                aligned_trajs[frame][i * new_shape[1] + j] = rotated_frame[i, j]
+
+    return aligned_trajs
+
+
+@nb.njit()
+def rotate_numba(
+    p: np.array, angles: np.array, origin: np.array = np.array([0, 0])
+) -> np.array:  # pragma: no cover
+    """Return a 2D numpy.ndarray with the initial values rotated by angles radians.
+
+    Args:
+        p (numpy.ndarray): 2D Array containing positions of bodyparts over time.
+        angles (numpy.ndarray): Set of angles (in radians) to rotate p with.
+        origin (numpy.ndarray): Rotation axis (zero vector by default).
+
+    Returns:
+        - rotated (numpy.ndarray): rotated positions over time
+
+    """
+    # initializations
+    arr_shape = p.shape
+    p_centered = np.zeros(arr_shape)
+    rotated = np.empty(arr_shape, dtype=np.float64)
+
+    # define rotation matrix
+    R = np.array([[np.cos(angles), -np.sin(angles)], [np.sin(angles), np.cos(angles)]])
+
+    # ensure p is a 2D array
+    if p.ndim <= 1:
+        p = p.reshape(1, p.size)
+
+    # substract origin
+    for i in range(arr_shape[1]):
+        for j in range(arr_shape[0]):
+            p_centered[j][i] = p[j][i] - origin[i]
+    # rotate matrix
+    rotated_centered = (R @ p_centered.T).T
+    # re-add origin
+    for i in range(arr_shape[1]):
+        for j in range(arr_shape[0]):
+            rotated[j][i] = rotated_centered[j][i] + origin[i]
+
+    return rotated
+
+
+def point_in_polygon(points: np.array, polygon: Polygon) -> np.array:
+    """
+    Check if a set of points is inside a polygon.
+
+    Args:
+        points (np.ndarray): An array of shape (M, 2) containing the coordinates of the points.
+        polygon (shapely.geometry.polygon.Polygon): Shapely polygon.
+
+    Returns:
+        np.ndarray: A boolean array of shape (M,) indicating whether each point is inside the polygon.
+    """
+    if type(polygon != Polygon):
+        polygon=Polygon(polygon)
+    inside = np.array([polygon.contains(Point(n)) for n in points])
+    return inside
+
+
+@nb.njit(parallel=True)
+def point_in_polygon_numba(
+    points: np.array, polygon: np.array
+) -> np.array:  # pragma: no cover
+    """
+    This function was generated by Perplexity.ai
+    Check if a set of points is inside a polygon.
+
+    Args:
+        points (np.ndarray): An array of shape (M, 2) containing the coordinates of the points.
+        polygon (np.ndarray): An array of shape (N, 2) containing the coordinates of the polygon vertices.
+
+    Returns:
+        np.ndarray: A boolean array of shape (M,) indicating whether each point is inside the polygon.
+    """
+    M = points.shape[0]
+    N = polygon.shape[0]
+    inside = np.zeros(M, dtype=np.bool_)
+
+    for i in nb.prange(M):
+        x, y = points[i]
+        inside[i] = _is_point_inside_numba(x, y, polygon)
+
+    return inside
+
+
+@nb.njit()
+def _is_point_inside_numba(
+    x: float, y: float, polygon: np.array
+) -> bool:  # pragma: no cover
+    """
+    This function was generated by Perplexity.ai
+    Check if a point is inside a polygon using the ray casting algorithm.
+
+    Args:
+        x (float): The x-coordinate of the point.
+        y (float): The y-coordinate of the point.
+        polygon (np.ndarray): An array of shape (N, 2) containing the coordinates of the polygon vertices.
+
+    Returns:
+        bool: True if the point is inside the polygon, False otherwise.
+    """
+    N = polygon.shape[0]
+    inside = False
+
+    for i in range(N):
+        j = (i + 1) % N
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[j]
+
+        if y > min(y1, y2) and y <= max(y1, y2) and x <= max(x1, x2):
+            if y1 != y2:
+                xinters = (y - y1) * (x2 - x1) / (y2 - y1) + x1
+            if x1 == x2 or x <= xinters:
+                inside = not inside
+
+    return inside
+
+
+
+def get_point_polygon_distance(points: np.ndarray, polygon: Polygon) -> np.ndarray: # pragma: no cover
+    """Calculates array of distances between 2D points and a polygon (roi)"""
+
+    assert points.size > 0 and points.ndim == 2
+    
+    if not isinstance(polygon, Polygon):
+        polygon = Polygon(polygon)
+        
+    # Shapely repeats the start point at the end, so a triangle has 4 coords
+    assert not polygon.is_empty and len(polygon.exterior.coords) >= 4
+
+    boundary = polygon.boundary
+    distances = np.array([boundary.distance(Point(p)) for p in points])
+    
+    return distances
+
+
+@nb.njit(cache=True)
+def _seg_dist2(px, py, ax, ay, bx, by): # pragma: no cover
+    vx, vy = bx - ax, by - ay
+    wx, wy = px - ax, py - ay
+    c1 = wx * vx + wy * vy
+    if c1 <= 0.0:
+        dx, dy = px - ax, py - ay
+        return dx*dx + dy*dy
+    c2 = vx*vx + vy*vy
+    if c2 <= 0.0:
+        dx, dy = px - ax, py - ay
+        return dx*dx + dy*dy
+    t = c1 / c2
+    if t >= 1.0:
+        dx, dy = px - bx, py - by
+        return dx*dx + dy*dy
+    qx, qy = ax + t * vx, ay + t * vy
+    dx, dy = px - qx, py - qy
+    return dx*dx + dy*dy
+
+@nb.njit(parallel=True, cache=True)
+def get_point_polygon_distance_numba(points, poly_xy): # pragma: no cover
+    pts = points
+    M = poly_xy.shape[0]
+    # drop closing vertex if repeated
+    if M >= 2 and poly_xy[0,0] == poly_xy[M-1,0] and poly_xy[0,1] == poly_xy[M-1,1]:
+        M -= 1
+
+    out = np.empty(pts.shape[0], np.float64)
+    out[:] = np.nan
+
+    for i in nb.prange(pts.shape[0]):
+        px, py = pts[i, 0], pts[i, 1]
+        if not (np.isfinite(px) and np.isfinite(py)):
+            continue
+
+        best2 = 1e308
+        for k in range(M):
+            j = 0 if (k + 1 == M) else (k + 1)
+            ax, ay = poly_xy[k, 0], poly_xy[k, 1]
+            bx, by = poly_xy[j, 0], poly_xy[j, 1]
+            d2 = _seg_dist2(px, py, ax, ay, bx, by)
+            if d2 < best2:
+                best2 = d2
+        out[i] = np.sqrt(best2)
+
+    return out
+
+def in_field_of_view(mouse_pts: np.ndarray,
+                     fov_angle_deg: float,
+                     roi: Polygon,
+                     plot: bool = True,
+                     eps: float = 1e-10) -> np.ndarray:
+    """
+    mouse_pts: (N, 3, 2) or (3, 2), order [left_ear, nose, right_ear]
+    Returns float array of shape (N,):
+        1.0  -> ROI intersects FOV
+        0.0  -> ROI does not intersect FOV
+        np.nan -> cannot be calculated (invalid/degenerate geometry or non-finite points)
+    Apex of FOV triangle is midpoint between ears.
+    """
+    mouse_pts = np.asarray(mouse_pts, dtype=float)
+    if mouse_pts.ndim == 2:
+        mouse_pts = mouse_pts[None, ...]
+    assert mouse_pts.ndim == 3 and mouse_pts.shape[1:] == (3, 2)
+
+    if not isinstance(roi, Polygon):
+        roi = Polygon(roi)
+    assert not roi.is_empty
+
+    fov_angle_deg = float(fov_angle_deg)
+    if not (0.0 < fov_angle_deg < 180.0):
+        raise ValueError("fov_angle_deg must be in (0, 180).")
+    if fov_angle_deg < 1e-6:
+        return np.full((mouse_pts.shape[0],), np.nan, dtype=float)
+
+    half = np.deg2rad(fov_angle_deg) / 2.0
+    out = np.full((mouse_pts.shape[0],), np.nan, dtype=float)
+
+    minx, miny, maxx, maxy = roi.bounds
+    roi_corners = np.array([[minx, miny], [minx, maxy], [maxx, miny], [maxx, maxy]], dtype=float)
+
+    sectors = []
+    for i, (L, N, R) in enumerate(mouse_pts):
+        apex = 0.5 * (L + R)
+        ear_vec = R - L
+        perp = np.array([-ear_vec[1], ear_vec[0]], dtype=float)
+        if np.dot(perp, N - apex) < 0:
+            perp = -perp
+
+        nrm = np.linalg.norm(perp)
+        fwd = perp / nrm if nrm >= eps else perp
+        
+        ca, sa = np.cos(half), np.sin(half)
+        d1 = np.array([ca * fwd[0] - sa * fwd[1], sa * fwd[0] + ca * fwd[1]], dtype=float)
+        d2 = np.array([ca * fwd[0] + sa * fwd[1], -sa * fwd[0] + ca * fwd[1]], dtype=float)
+        
+        cross = d1[0] * d2[1] - d1[1] * d2[0]
+        r = (1.05 * np.max(np.linalg.norm(roi_corners - apex[None, :], axis=1)) + 1e-6) * (1 / np.cos(half))
+        
+        p0, p1, p2 = apex, apex + r * d1, apex + r * d2
+        sector = Polygon([tuple(p0), tuple(p1), tuple(p2)])
+        
+        # Validation check
+        valid = (
+            np.isfinite(L).all() and np.isfinite(N).all() and np.isfinite(R).all() and
+            np.linalg.norm(ear_vec) >= eps and
+            nrm >= eps and
+            abs(cross) >= 1e-12 and
+            np.isfinite(r) and r > 0 and
+            np.isfinite(p0).all() and np.isfinite(p1).all() and np.isfinite(p2).all() and
+            not sector.is_empty and sector.is_valid and sector.area >= 1e-12
+        )
+        
+        if valid:
+            sectors.append(sector)
+            out[i] = 1.0 if sector.intersects(roi) else 0.0
+        else:
+            sectors.append(None)
+
+    if plot: # pragma: no cover
+        idx = -1
+        L, N, R = mouse_pts[idx]
+        apex = 0.5 * (L + R)
+        sector = sectors[idx]
+
+        fig, ax = plt.subplots(figsize=(6, 6))
+
+        x, y = roi.exterior.xy
+        ax.plot(x, y, "k-", lw=2, label="ROI")
+        ax.fill(x, y, color="k", alpha=0.08)
+
+        if sector is not None:
+            sx, sy = sector.exterior.xy
+            ax.plot(sx, sy, "C0-", lw=2, label="FOV")
+            ax.fill(sx, sy, color="C0", alpha=0.15)
+
+        ax.plot([L[0], R[0]], [L[1], R[1]], "C1--", lw=1)
+        ax.scatter([L[0], apex[0], N[0], R[0]],
+                   [L[1], apex[1], N[1], R[1]],
+                   c=["C1", "C3", "C2", "C1"], s=60)
+        ax.text(L[0], L[1], "L")
+        ax.text(apex[0], apex[1], "Apex")
+        ax.text(N[0], N[1], "N")
+        ax.text(R[0], R[1], "R")
+
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_title(f"ROI in FOV (last frame): {out[idx]}")
+        ax.legend(loc="best")
+        ax.grid(True, alpha=0.2)
+        plt.show()
+
+    return out
+
+@nb.njit(cache=True)
+def _orient(ax, ay, bx, by, cx, cy): # pragma: no cover
+    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+
+
+@nb.njit(cache=True)
+def _on_segment(ax, ay, bx, by, px, py, eps): # pragma: no cover
+    # p collinear with segment a-b and within bounding box
+    if abs(_orient(ax, ay, bx, by, px, py)) > eps:
+        return False
+    if px < min(ax, bx) - eps or px > max(ax, bx) + eps:
+        return False
+    if py < min(ay, by) - eps or py > max(ay, by) + eps:
+        return False
+    return True
+
+
+@nb.njit(cache=True)
+def _segments_intersect(ax, ay, bx, by, cx, cy, dx, dy, eps): # pragma: no cover
+    o1 = _orient(ax, ay, bx, by, cx, cy)
+    o2 = _orient(ax, ay, bx, by, dx, dy)
+    o3 = _orient(cx, cy, dx, dy, ax, ay)
+    o4 = _orient(cx, cy, dx, dy, bx, by)
+
+    # proper intersection
+    if ((o1 > eps and o2 < -eps) or (o1 < -eps and o2 > eps)) and \
+       ((o3 > eps and o4 < -eps) or (o3 < -eps and o4 > eps)):
+        return True
+
+    # collinear/touching
+    if abs(o1) <= eps and _on_segment(ax, ay, bx, by, cx, cy, eps): return True
+    if abs(o2) <= eps and _on_segment(ax, ay, bx, by, dx, dy, eps): return True
+    if abs(o3) <= eps and _on_segment(cx, cy, dx, dy, ax, ay, eps): return True
+    if abs(o4) <= eps and _on_segment(cx, cy, dx, dy, bx, by, eps): return True
+
+    return False
+
+
+@nb.njit(cache=True)
+def _point_in_poly(px, py, poly, eps): # pragma: no cover
+    """Ray casting + boundary included."""
+    m = poly.shape[0]
+    inside = False
+
+    xj, yj = poly[m - 1, 0], poly[m - 1, 1]
+    for i in range(m):
+        xi, yi = poly[i, 0], poly[i, 1]
+
+        if _on_segment(xj, yj, xi, yi, px, py, eps):
+            return True
+
+        # crossing test
+        if (yi > py) != (yj > py):
+            xint = (xj - xi) * (py - yi) / (yj - yi + 0.0) + xi
+            if px < xint:
+                inside = not inside
+
+        xj, yj = xi, yi
+
+    return inside
+
+
+@nb.njit(cache=True)
+def _point_in_tri(px, py, ax, ay, bx, by, cx, cy, eps): # pragma: no cover
+    """Same-side test; boundary included."""
+    abp = _orient(ax, ay, bx, by, px, py)
+    bcp = _orient(bx, by, cx, cy, px, py)
+    cap = _orient(cx, cy, ax, ay, px, py)
+
+    has_neg = (abp < -eps) or (bcp < -eps) or (cap < -eps)
+    has_pos = (abp > eps) or (bcp > eps) or (cap > eps)
+    return not (has_neg and has_pos)
+
+
+@nb.njit(cache=True)
+def _tri_poly_intersects(poly, ax, ay, bx, by, cx, cy, eps): # pragma: no cover
+    # 1) triangle vertex in polygon
+    if _point_in_poly(ax, ay, poly, eps): return True
+    if _point_in_poly(bx, by, poly, eps): return True
+    if _point_in_poly(cx, cy, poly, eps): return True
+
+    # 2) polygon vertex in triangle
+    m = poly.shape[0]
+    for i in range(m):
+        px, py = poly[i, 0], poly[i, 1]
+        if _point_in_tri(px, py, ax, ay, bx, by, cx, cy, eps):
+            return True
+
+    # 3) any edge intersection
+    for i in range(m):
+        j = (i + 1) % m
+        p1x, p1y = poly[i, 0], poly[i, 1]
+        p2x, p2y = poly[j, 0], poly[j, 1]
+
+        if _segments_intersect(ax, ay, bx, by, p1x, p1y, p2x, p2y, eps): return True
+        if _segments_intersect(bx, by, cx, cy, p1x, p1y, p2x, p2y, eps): return True
+        if _segments_intersect(cx, cy, ax, ay, p1x, p1y, p2x, p2y, eps): return True
+
+    return False
+
+
+@nb.njit(cache=True)
+def _rotate_vec(vx, vy, ang): # pragma: no cover
+    ca = np.cos(ang)
+    sa = np.sin(ang)
+    return ca * vx - sa * vy, sa * vx + ca * vy
+
+
+@nb.njit(parallel=True, cache=True)
+def in_field_of_view_numba(mouse_pts, fov_angle_deg, roi_poly, eps=1e-10): # pragma: no cover
+    """
+    Numba version of in_field_of_view (no plotting, no shapely).
+
+    mouse_pts: (N,3,2) float64
+    roi_poly:  (M,2) float64 (not closed)
+    returns:   (N,) float64 in {1.0, 0.0, nan}
+    """
+    n = mouse_pts.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    out[:] = np.nan
+
+    # validate angle (numba-friendly: just produce all-nan for invalid)
+    if not (fov_angle_deg > 0.0 and fov_angle_deg < 180.0):
+        return out
+    if fov_angle_deg < 1e-6:
+        return out
+
+    half = (fov_angle_deg * np.pi / 180.0) * 0.5
+
+    # ROI bbox corners (constant across frames)
+    minx = roi_poly[0, 0]
+    maxx = roi_poly[0, 0]
+    miny = roi_poly[0, 1]
+    maxy = roi_poly[0, 1]
+    for i in range(1, roi_poly.shape[0]):
+        x = roi_poly[i, 0]
+        y = roi_poly[i, 1]
+        if x < minx: minx = x
+        if x > maxx: maxx = x
+        if y < miny: miny = y
+        if y > maxy: maxy = y
+
+    c0x, c0y = minx, miny
+    c1x, c1y = minx, maxy
+    c2x, c2y = maxx, miny
+    c3x, c3y = maxx, maxy
+
+    for t in nb.prange(n):
+        Lx, Ly = mouse_pts[t, 0, 0], mouse_pts[t, 0, 1]
+        Nx, Ny = mouse_pts[t, 1, 0], mouse_pts[t, 1, 1]
+        Rx, Ry = mouse_pts[t, 2, 0], mouse_pts[t, 2, 1]
+
+        if not (np.isfinite(Lx) and np.isfinite(Ly) and np.isfinite(Nx) and np.isfinite(Ny) and np.isfinite(Rx) and np.isfinite(Ry)):
+            continue
+
+        apex_x = 0.5 * (Lx + Rx)
+        apex_y = 0.5 * (Ly + Ry)
+
+        ear_x = Rx - Lx
+        ear_y = Ry - Ly
+        if ear_x * ear_x + ear_y * ear_y < eps * eps:
+            continue
+
+        # perpendicular vector
+        perp_x = -ear_y
+        perp_y = ear_x
+
+        # flip toward nose
+        if perp_x * (Nx - apex_x) + perp_y * (Ny - apex_y) < 0.0:
+            perp_x = -perp_x
+            perp_y = -perp_y
+
+        perp_norm2 = perp_x * perp_x + perp_y * perp_y
+        if perp_norm2 < eps * eps:
+            continue
+
+        invn = 1.0 / np.sqrt(perp_norm2)
+        fwd_x = perp_x * invn
+        fwd_y = perp_y * invn
+
+        d1x, d1y = _rotate_vec(fwd_x, fwd_y, +half)
+        d2x, d2y = _rotate_vec(fwd_x, fwd_y, -half)
+
+        # degenerate rays
+        cross = d1x * d2y - d1y * d2x
+        if abs(cross) < 1e-12:
+            continue
+
+        # radius to cover ROI bbox corners (same spirit as shapely version)
+        maxd2 = 0.0
+        dx = c0x - apex_x
+        dy = c0y - apex_y
+        d2 = dx*dx + dy*dy
+        maxd2 = d2 if d2 > maxd2 else maxd2
+        dx = c1x - apex_x
+        dy = c1y - apex_y
+        d2 = dx*dx + dy*dy
+        maxd2 = d2 if d2 > maxd2 else maxd2
+        dx = c2x - apex_x
+        dy = c2y - apex_y
+        d2 = dx*dx + dy*dy
+        maxd2 = d2 if d2 > maxd2 else maxd2
+        dx = c3x - apex_x
+        dy = c3y - apex_y
+        d2 = dx*dx + dy*dy
+        maxd2 = d2 if d2 > maxd2 else maxd2
+
+        r = (1.05 * np.sqrt(maxd2) + 1e-6) *(1 / np.cos(half))
+        if not np.isfinite(r) or r <= 0.0:
+            continue
+
+        ax, ay = apex_x, apex_y
+        bx, by = apex_x + r * d1x, apex_y + r * d1y
+        cx, cy = apex_x + r * d2x, apex_y + r * d2y
+
+        # triangle area check
+        if abs(_orient(ax, ay, bx, by, cx, cy)) < 1e-12:
+            continue
+
+        out[t] = 1.0 if _tri_poly_intersects(roi_poly, ax, ay, bx, by, cx, cy, eps) else 0.0
+
+    return out
+
+
+def mouse_in_roi(tab, aid, in_roi_criterion, roi_polygon, invert_roi, run_numba=False):
+    """Checks if a given animal for a given table is in a given roi by given criterion.
+
+    Args:
+        tab (dataTable): Datatable containing mouse tracking data.
+        aid (str): ainimal id of the mouse to check
+        in_roi_criterion (str): Criterion for in roi check, can be a single bodypart, a list of bodyparts or "all" bodyparts of a mouse   
+        roi_polygon (np.ndarray): 2D numpy array containing the coordinats of the ROI
+        run_numba (bool): Determines if numba versions of functions should be used (run faster but require initial compilation time on first run)
+    Returns:
+        mouse_in_polygon (np.ndarray): A boolean array indicating whether the mouse is inside the ROI.
+    """
+    
+    
+    if isinstance(in_roi_criterion, str):
+        in_roi_criterion = [in_roi_criterion]
+
+    if aid:
+        if "all" in in_roi_criterion:
+            bodyparts = [c for c in tab.columns.get_level_values(0).unique() if c.startswith(aid)]
+        else:
+            bodyparts = [f"{aid}_{bp}" for bp in in_roi_criterion]
+    else:
+        bodyparts = tab.columns.get_level_values(0).unique() if "all" in in_roi_criterion else in_roi_criterion
+
+    roi_polygon = np.asarray(roi_polygon)
+
+    mask = np.ones(len(tab), dtype=bool)
+    for bp in bodyparts:
+        # select only x,y for that bodypart and immediately go to numpy
+        pts = tab.loc[:, pd.IndexSlice[bp, ["x", "y"]]].to_numpy(copy=False)
+        pts = np.ascontiguousarray(pts)  # good for numba
+
+        if run_numba:
+            mask &= deepof.utils.point_in_polygon_numba(pts, roi_polygon)
+        else:
+            mask &= deepof.utils.point_in_polygon(pts, roi_polygon)
+
+    # to instead count if the specific bodyparts of the animal are NOT in the ROI
+    if invert_roi:
+        mask=np.invert(mask)
+
+    return mask
+
+
+def _get_mousevise_behaviors_in_roi(
+    cur_supervised: pd.DataFrame,
+    local_bin_info: dict,
+    animal_ids: Union[str, list], 
+):
+    """Filter out all frames in which the requested animals are not inside of the ROI"""
+    
+    # get list of masks for all animals
+    masks = [local_bin_info[aid] for aid in animal_ids]
+    if not masks:
+        return cur_supervised # No animals to filter by, return as is
+    
+    # Fancy numpy operation
+    combined_mask = np.logical_and.reduce(masks)
+    
+    # Apply the combined mask to the entire DataFrame at once.
+    cur_supervised.loc[~combined_mask, :] = np.nan
+    return cur_supervised  
+
+
+
+def _get_behaviorwise_behaviors_in_roi(
+    cur_supervised: pd.DataFrame,
+    local_bin_info: dict,
+    animal_ids: Union[str, list], 
+):
+    """Filter out all frames in which the requested animals that take part in each individual behavior are not inside of the ROI"""
+
+    def _get_col_base_name(col: Any) -> str:
+        """Safely gets the first level of a column name, handling MultiIndex."""
+        return col[0] if isinstance(col, tuple) else col
+
+    # 1. Determine which columns are relevant (involve at least one target_id).
+    # This list comprehension is more direct than the original nested loop.
+    valid_cols = {
+        col for col in cur_supervised.columns 
+        if any(_get_col_base_name(col).startswith(animal_id) for animal_id in animal_ids)
+    }
+
+    # 2. Invalidate all columns that do not involve any of the target animals.
+    invalid_cols = cur_supervised.columns.difference(list(valid_cols))
+    if not invalid_cols.empty:
+        cur_supervised[invalid_cols] = np.nan
+
+    if not valid_cols:
+        return cur_supervised # No relevant columns to process further.
+
+    # 3. Apply ROI masks animal by animal, but only to their relevant columns.
+    for animal_id, roi_mask in local_bin_info.items():
+        if animal_id == "time":
+            continue
+        # if there is more than one mosue, add underscores
+        animal_id_suffix = animal_id
+        if len(local_bin_info)>2:
+            animal_id_suffix = animal_id + "_"
+            
+        # Find which of the valid_cols are associated with the current animal_id
+        cols_for_this_animal = [
+            col for col in valid_cols 
+            if (animal_id_suffix) in _get_col_base_name(col)
+        ]
+        
+        if cols_for_this_animal:
+            # Apply the specific ROI mask for this animal to its columns.
+            cur_supervised.loc[~roi_mask, cols_for_this_animal] = np.nan
+            
+    return cur_supervised
+    
+
+def get_supervised_behaviors_in_roi(
+    cur_supervised: pd.DataFrame,
+    local_bin_info: dict,
+    animal_ids: Union[str, list], 
+    roi_mode: str = "mousewise",
+):
+    """Filter supervised behaviors based on rois given by animal_ids.
+
+    Args:
+        cur_supervised (pd.DataFrame): data frame with supervised behaviors.
+        local_bin_info (dict): bin_info dictionary for one experiment, containing field "time" with array of included frames and fields "animal_id" with boolean arrays that denote which mace were within the selcted roi for these frames
+        animal_ids (Union[str, list]): single or multiple animal ids
+        roi_mode (str): Determines how the rois should be applied to different behaviors. Options are "mousewise" (default, selected mice needs to be inside the ROI) and "behaviorwise" (only mice involved in a behavior need to be inside of the ROI, only for supervised behaviors)                
+ 
+    Returns:
+        cur_supervised (pd.DataFrame): data frame with supervised behaviors with detections outside of the ROI set to NaN
+    """
+    
+    # Check and reformat input
+    if not animal_ids:
+        return cur_supervised  
+    animal_ids = [animal_ids] if isinstance(animal_ids, str) else list(animal_ids)
+
+    cur_supervised=copy.copy(cur_supervised)
+
+    # Filter 
+    if roi_mode=="mousewise":
+        cur_supervised = _get_mousevise_behaviors_in_roi(cur_supervised,local_bin_info,animal_ids)
+    elif roi_mode == "behaviorwise":
+        cur_supervised = _get_behaviorwise_behaviors_in_roi(cur_supervised,local_bin_info,animal_ids)
+    else:
+        raise NotImplementedError("Currently only \"mousewise\" and \"behaviorwise\" are valid roi modes.")  # pragma: no cover
+            
+    return cur_supervised
+
+
+def get_unsupervised_behaviors_in_roi(
+        cur_unsupervised: np.array,
+        local_bin_info: dict,
+        animal_ids: str, 
+):
+    """Filter unsupervised behaviors based on rois given by animal_ids.
+
+    Args:
+        cur_unsupervised (np.array): 1D or 2D array with unsupervised behaviors (can be soft or hard counts).
+        local_bin_info (dict): bin_info dictionary for one experiment, containing field "time" with array of included frames and fields "animal_id" with boolean arrays that denote which mace were within the selcted roi for these frames
+        animal_ids (Union[str, list]): single or multiple animal ids
+    
+    Returns:
+        cur_unsupervised (np.array): 1D or 2D array with unsupervised behaviors with detections outside of the ROI set to NaN (2D) or -1 (1D)
+    """
+
+    cur_unsupervised=copy.copy(cur_unsupervised)
+    if type(animal_ids)==str:
+        animal_ids=[animal_ids]
+    elif animal_ids is None:
+        animal_ids=[""] 
+
+    if len(cur_unsupervised.shape)==1:
+        for aid in animal_ids:
+            cur_unsupervised[~local_bin_info[aid]]=-1    
+    else:
+        for aid in animal_ids: 
+            cur_unsupervised[~local_bin_info[aid]]=np.NaN   
+
+    return cur_unsupervised
+
+
+def get_behavior_frames_in_roi(
+    behavior: str,
+    local_bin_info: dict,
+    animal_ids: Union[str, list],        
+):
+    """Filter unsupervised behaviors based on rois given by animal_ids.
+
+    Args:
+        behavior (str): Behavior for which frames in ROi get determined.
+        local_bin_info (dict): bin_info dictionary for one experiment, containing field "time" with array of included frames and fields "animal_id" with boolean arrays that denote which mace were within the selcted roi for these frames
+        animal_ids (Union[str, list]): single or multiple animal ids
+    
+    Returns:
+        frames (np.array): 1D array containing all frames for which the animal is (animals are) within the ROI
+    """
+
+    if isinstance(animal_ids, str):
+        animal_ids=[animal_ids]
+    elif animal_ids is None:
+        animal_ids=[""]   
+
+    local_bin_info = copy.copy(local_bin_info)
+    frames = copy.copy(local_bin_info["time"])
+
+    is_supervised_behavior = False
+    if behavior is not None:
+        is_supervised_behavior = any([aid+"_" in behavior for aid in animal_ids])
+       
+    if is_supervised_behavior:
+        for aid in local_bin_info.keys():
+            if aid == "time":
+                continue
+            if aid + "_" in behavior:
+                frames[~local_bin_info[aid]]=-1
+    else:
+        for aid in animal_ids:
+            frames[~local_bin_info[aid]]=-1
+    
+    frames=frames[frames >= 0]
+    return frames
+
+
+# noinspection PyArgumentList
+def align_trajectories(
+    data: np.array, mode: str = "all", run_numba: bool = False
+) -> np.array:  # pragma: no cover
+    """Remove rotational variance on the trajectories.
+
+    Returns a numpy.array with the positions rotated in a way that the center (0 vector), and body part in the first
+    column of data are aligned with the y-axis.
+
+    Args:
+        data (numpy.ndarray): 3D array containing positions of body parts over time, where shape is N (sliding window instances) * m (sliding window size) * l (features)
+        mode (string): Specifies if *all* instances of each sliding window get aligned, or only the *center*
+        run_numba (bool): Determines if numba versions of functions should be used (run faster but require initial compilation time on first run)
+
+    Returns:
+        aligned_trajs (np.ndarray): 2D aligned positions over time.
+
+    """
+    angles = np.zeros(data.shape[0])
+    data = deepcopy(data)
+    dshape = data.shape
+
+    if mode == "center":
+        center_time = (data.shape[1] - 1) // 2
+        angles = np.arctan2(data[:, center_time, 0], data[:, center_time, 1])
+    elif mode == "all":
+        data = data.reshape(-1, dshape[-1], order="C")
+        angles = np.arctan2(data[:, 0], data[:, 1])
+    elif mode == "none":
+        data = data.reshape(-1, dshape[-1], order="C")
+        angles = np.zeros(data.shape[0])
+
+    # run numba version for large videos
+    if run_numba:
+        aligned_trajs = rotate_all_numba(data, angles)
+    else:
+        aligned_trajs = np.zeros(data.shape)
+
+        for frame in range(data.shape[0]):
+            aligned_trajs[frame] = rotate(
+                data[frame].reshape([-1, 2], order="C"), angles[frame]
+            ).reshape(data.shape[1:], order="C")
+
+    if mode == "all" or mode == "none":
+        aligned_trajs = aligned_trajs.reshape(dshape, order="C")
+
+    return aligned_trajs
+
+
+def align_embeddings_at_key(embeddings, supervised_annotations, key, window_size=None, alignment_mode="center"):
+    """returns mid-sections of current embedding and supervised_annotations at key"""
+
+    assert key in embeddings.keys() and key in supervised_annotations.keys(), "No mebeddings-supervised alignment possible! Key not found in at least one of both table dicts!"
+
+    cur_embeddings = get_dt(embeddings,key)
+    cur_supervised = get_dt(supervised_annotations, key)
+
+    assert cur_embeddings.shape[0]<=cur_supervised.shape[0], "Error! Labels exceed windows!"
+
+    if window_size is None:
+        window_size=cur_supervised.shape[0]-cur_embeddings.shape[0]+1
+
+    # cut out middle section to align with windows, strict cutting
+    center = window_size // 2  # for even W, this is the right-of-center convention
+    start = center
+    end = start + cur_embeddings.shape[0]
+    if alignment_mode=="center":
+        # Pick the label at the window center for each window.
+        center = window_size // 2  # for even W, this is the right-of-center convention
+        start = center
+        end = start + cur_embeddings.shape[0]
+        cur_supervised_aligned = cur_supervised.iloc[start:end].reset_index(drop=True)
+
+    elif alignment_mode=="any":
+
+        # Per-window OR for binary labels: trailing rolling max over each window.
+        cur_supervised_aligned = (
+            cur_supervised
+            .rolling(window=window_size, min_periods=window_size)  # trailing window (aligns with window start after reset)
+            .max()
+            .reset_index(drop=True)
+        ) 
+        cur_supervised_aligned = cur_supervised_aligned.iloc[start:end].reset_index(drop=True)  #.iloc[window_size-1:window_size-1+cur_embeddings.shape[0]].reset_index(drop=True)
+
+    else:
+        raise NotImplementedError("Error, only \"center\" and \"any\" modes are available")
+
+    assert cur_embeddings.shape[0]==cur_supervised_aligned.shape[0], "Error! Alignment unsuccessful!"
+
+    return cur_embeddings, cur_supervised_aligned
+    
+
+def load_table(
+    tab: str,
+    table_path: str,
+    table_format: str,
+    rename_bodyparts_dict: dict = None,
+    animal_ids: list = None,
+):
+    """Loads a table into a structured pandas data frame.
+
+    Supports inputs from both DeepLabCut and (S)LEAP.
+
+    Args:
+        tab (str): Name of the file containing the tracks.
+        table_path (string): Full path to the file containing the tracks.
+        table_format (str): type of the files to load, coming from either DeepLabCut (CSV and H5) and (S)LEAP (NPY).
+        rename_bodyparts_dict (dict): dictionary of bodypart names given in the table corresponding to deepOFs bodypart names.
+        animal_ids (list): List with the animal ids in case of multiple tracked animals. Is expected to be None if there is only a single animal getting tracked.
+        
+    Returns:
+        loaded_tab (pd.DataFrame): Data frame containing the loaded tracks. Likelihood for (S)LEAP files is imputed as 1.0 (tracked values) or 0.0 (missing values).
+
+    """
+
+    if table_format == "h5":
+
+        loaded_tab = pd.read_hdf(os.path.join(table_path, tab), dtype=float)
+
+        # Adapt index to be compatible with downstream processing
+        loaded_tab = loaded_tab.T.reset_index(drop=False).T
+        loaded_tab.columns = loaded_tab.loc["scorer", :]
+        loaded_tab = loaded_tab.iloc[1:]
+
+    elif table_format == "csv":
+
+        loaded_tab = pd.read_csv(
+            os.path.join(table_path, tab),
+            index_col=0,
+            low_memory=False,
+        )
+
+    elif table_format in ["npy", "slp", "analysis.h5"]:
+
+        if table_format == "analysis.h5":
+            # Load sleap .h5 file from disk
+            with h5py.File(os.path.join(table_path, tab), "r") as f:
+                loaded_tab = np.stack(np.transpose(f["tracks"][:], [3, 0, 2, 1]))
+                slp_bodyparts = [n.decode() for n in f["node_names"][:]]
+                slp_animal_ids = [n.decode() for n in f["track_names"][:]]
+
+        elif table_format == "slp":
+            # Use sleap-io to convert .slp files into numpy arrays
+            loaded_tab = sio.load_slp(os.path.join(table_path, tab))
+            slp_bodyparts = [i.name for i in loaded_tab.skeletons[0].nodes]
+            slp_animal_ids = [i.name for i in loaded_tab.tracks]
+            loaded_tab = loaded_tab.numpy()
+
+        else:
+            # Load numpy array from disk
+            loaded_tab = np.load(os.path.join(table_path, tab), "r")
+
+            # Check that body part names are provided
+            slp_bodyparts = rename_bodyparts_dict.keys()
+            if not animal_ids[0]:
+                slp_animal_ids = [str(i) for i in range(loaded_tab.shape[1])]
+            else:
+                slp_animal_ids = animal_ids
+        assert len(slp_bodyparts) == loaded_tab.shape[2], (
+            "Some body part names appear to be in excess or missing.\n"
+            f" The table you loaded has {loaded_tab.shape[2]} columns but no headers.\n"
+            " Respectively you should choose appropriate bodypart names from deepof8, 11 or 14\n" 
+            " and use privide these with rename_bodyparts as a list input" 
+            " Otherwise, there might be an issue with the tables in your Tables-folder"
+        )
+
+        # Create the header as a multi index, using animals, body parts and coordinates
+        if not animal_ids[0]:
+            animal_ids = slp_animal_ids
+
+        # Impute likelihood as a third dimension in the last axis,
+        # with 1.0 if xy values are present and 0.0 otherwise
+        likelihoods = np.expand_dims(
+            np.all(np.isfinite(loaded_tab), axis=-1), axis=-1
+        ).astype(float)
+        loaded_tab = np.concatenate([loaded_tab, likelihoods], axis=-1)
+
+        # Collapse nodes and animals to the desired shape
+        loaded_tab = pd.DataFrame(loaded_tab.reshape(loaded_tab.shape[0], -1))
+
+        multi_index = pd.MultiIndex.from_product(
+            [["sleap_scorer"], slp_animal_ids, slp_bodyparts, ["x", "y", "likelihood"]],
+            names=["scorer", "individuals", "bodyparts", "coords"],
+        )
+        multi_index = pd.DataFrame(
+            pd.DataFrame(multi_index).explode(0).values.reshape([-1, 4]).T,
+            index=["scorer", "individuals", "bodyparts", "coords"],
+        )
+
+        loaded_tab = pd.concat([multi_index.iloc[1:], loaded_tab], axis=0)
+        loaded_tab.columns = multi_index.loc["scorer"]
+
+    if rename_bodyparts_dict is not None:
+        loaded_tab = rename_track_bps(
+            loaded_tab,
+            rename_bodyparts_dict,
+            (animal_ids if table_format in ["h5", "csv"] else [""]),
+        )
+
+    return loaded_tab
+
+
+def rename_track_bps(
+    loaded_tab: pd.DataFrame, rename_bodyparts_dict: list, animal_ids: list
+):
+    """Renames all body parts in the provided dataframe.
+
+    Args:
+        loaded_tab (pd.DataFrame): Data frame containing the loaded tracks. Likelihood for (S)LEAP files is imputed as 1.0 (tracked values) or 0.0 (missing values).
+        rename_bodyparts_dict (dict): dictionary of bodypart names given in the table corresponding to deepOFs bodypart names.
+        animal_ids (list): list of IDs to use for the animals present in the provided tracking files.
+        bodypart_graph (str): DeepOF bodypart graph that is going to be used
+
+    Returns:
+        renamed_tab (pd.DataFrame): Data frame with renamed body parts
+
+    """
+    # Does not operate on a copy but the loaded project table directly! 
+    if rename_bodyparts_dict is None:
+        return loaded_tab
+
+    bp_row = loaded_tab.loc["bodyparts", :]
+    
+    # Block to make sure that all bodyparts that should be replaced also occur with that name in the given table
+    if not animal_ids[0]:
+        current_bparts = bp_row.unique()
+    else:
+        current_bparts = list(
+            map(
+                lambda x: "_".join(x.split("_")[1:]),
+                bp_row.unique(),
+            )
+        )
+    for bp in rename_bodyparts_dict.keys():
+        if not bp in current_bparts:
+            raise ValueError(f"\"{bp}\" does not correspond to any bodypart in the given table!\n Table bodyparts are {np.unique(current_bparts)}!")
+    
+    # Actual replacement of old table bp names with new ones
+    bp_row.replace(rename_bodyparts_dict, inplace=True, regex=True)
+    
+    # Should have been changed in place, this is just to be sure 
+    loaded_tab.loc["bodyparts", :] = bp_row
+
+    return loaded_tab
+
+
+@dataclass
+class GlobalScalerSpec:
+    """
+    Container for global scalers fitted across videos.
+
+    Notes:
+        - We keep the legacy dict format at the boundary (return value) to guarantee
+          backward compatibility and make preprocess_new output identical to preprocess.
+    """
+    kind: str
+    speed_mode: Optional[str]
+    dist_mode: Optional[str]
+    coord_mode: Optional[str]
+    log_distances: bool
+    speed: Any = None
+    dist: Any = None
+    dist_inner: Any = None
+    dist_intra: Any = None
+    coord: Any = None
+
+    def to_legacy_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "speed": self.speed,
+            "dist": self.dist,
+            "dist_inner": self.dist_inner,
+            "dist_intra": self.dist_intra,
+            "coord": self.coord,
+            "speed_mode": self.speed_mode,
+            "dist_mode": self.dist_mode,
+            "coord_mode": self.coord_mode,
+            "log_distances": self.log_distances,
+        }
+
+    def is_effectively_empty(self) -> bool:
+        return all(
+            self.to_legacy_dict().get(k) is None
+            for k in ("speed", "dist", "dist_inner", "dist_intra", "coord")
+        )
+    
+
+def infer_scalar_cols(df: pd.DataFrame):
+    coord_cols = [c for c in df.columns
+                if isinstance(c, tuple) and len(c) == 2 and c[1] in ("x", "y")]
+    bp_names = {c[0] for c in coord_cols}
+
+    speed_cols = [c for c in df.columns if isinstance(c, str) and c in bp_names]
+    dist_cols = [c for c in df.columns
+                if isinstance(c, tuple) and len(c) == 2 and c[0] in bp_names and c[1] in bp_names]
+
+    return speed_cols + dist_cols
+
+
+def infer_column_types(df):
+    """Identify coord, speed, distance, and angle columns from a pose table."""
+    coord_cols = [c for c in df.columns 
+                  if isinstance(c, tuple) and len(c) == 2 and c[1] in ("x", "y")]
+    bodyparts = {c[0] for c in coord_cols}
+    
+    speed_cols = [c for c in df.columns if isinstance(c, str) and c in bodyparts]
+    dist_cols = [c for c in df.columns
+                 if isinstance(c, tuple) and len(c) == 2
+                 and c[0] in bodyparts and c[1] in bodyparts]
+    angle_cols = [c for c in df.columns if isinstance(c, tuple) and len(c) == 3]
+
+    def _prefix(bp: str):
+        return bp.split("_", 1)[0] if "_" in bp else None
+
+    inner_dist_cols = [d for d in dist_cols if _prefix(d[0]) == _prefix(d[1])]
+    intra_dist_cols = [d for d in dist_cols if _prefix(d[0]) != _prefix(d[1])]
+    
+    return {
+        "coords": coord_cols,
+        "speeds": speed_cols, 
+        "dists": dist_cols,
+        "inner_dists": inner_dist_cols,
+        "intra_dists": intra_dist_cols,
+        "angles": angle_cols,
+        "bodyparts": bodyparts,
+        "scalars": speed_cols + dist_cols,
+    }
+  
+
+def scale_table(
+    df: pd.DataFrame,
+    scale: str = "standard",
+    animal_ids=None,
+    size_ref=("Nose", "Tail_base"),
+    inter_scale: str = "mean",    # {"mean","geom","global"}
+    standardize: bool = True,     # if False: only size-normalize
+    dist_standardize: str = "per_column",   # {"per_column","groupwise", None}
+    speed_standardize: str = "per_column",  # {"per_column","groupwise", None}
+    coord_standardize: str = "per_column",
+    log_distances: bool = True,
+) -> pd.DataFrame:
+    if not scale:
+        return df.copy()
+
+    if scale not in {"standard", "minmax", "robust"}:
+        raise ValueError("scale must be one of {'standard','minmax','robust', None/False}")
+    if dist_standardize not in {"per_column", "groupwise", None}:
+        raise ValueError("dist_standardize must be one of {'per_column','groupwise', None}")
+    if speed_standardize not in {"per_column", "groupwise", None}:
+        raise ValueError("speed_standardize must be one of {'per_column','groupwise', None}")
+    if coord_standardize not in {"per_column", "groupwise", None}:
+        raise ValueError("coord_standardize must be one of {'per_column','groupwise', None}")
+    if inter_scale not in {"mean", "geom", "global"}:
+        raise ValueError("inter_scale must be one of {'mean','geom','global'}")
+
+    out = df.copy()
+
+    # ----- infer columns -----
+    col_types = infer_column_types(out)
+    coord_cols = col_types["coords"]
+    speed_cols = col_types["speeds"]
+    dist_cols = col_types["dists"]
+    inner_dist_cols = col_types["inner_dists"]
+    intra_dist_cols = col_types["intra_dists"]
+    bodyparts = sorted(col_types["bodyparts"])
+
+    def _split_bp(bp: str):
+        return bp.split("_", 1) if "_" in bp else (None, bp)
+
+    # Infer animal_ids from bodypart prefixes if not provided
+    if animal_ids is None:
+        prefixes = {_split_bp(bp)[0] for bp in bodyparts if _split_bp(bp)[0] is not None}
+        animal_ids = sorted(prefixes) or [None]
+    animal_ids = list(animal_ids)
+
+    # Map bodypart -> animal_id prefix (or None)
+    bp_to_aid = {bp: _split_bp(bp)[0] for bp in bodyparts}
+
+    # ----- size factors per animal -----
+    ref_a, ref_b = size_ref
+    s_by_aid = {}
+
+    for aid in animal_ids:
+        a = ref_a if aid is None else f"{aid}_{ref_a}"
+        b = ref_b if aid is None else f"{aid}_{ref_b}"
+        need = [(a, "x"), (a, "y"), (b, "x"), (b, "y")]
+
+        if all(c in out.columns for c in need):
+            dx = out[(a, "x")].to_numpy(float) - out[(b, "x")].to_numpy(float)
+            dy = out[(a, "y")].to_numpy(float) - out[(b, "y")].to_numpy(float)
+            s_by_aid[aid] = np.nanmedian(np.hypot(dx, dy))
+        else:
+            s_by_aid[aid] = np.nan
+
+    valid = [v for v in s_by_aid.values() if np.isfinite(v) and v > 0]
+    s_default = float(np.nanmedian(valid)) if valid else 1.0
+    s_by_aid = {
+        aid: (v if np.isfinite(v) and v > 0 else s_default) for aid, v in s_by_aid.items()
+    }
+
+    def _comb(s1, s2) -> float:
+        if inter_scale == "mean":
+            return 0.5 * (s1 + s2)
+        if inter_scale == "geom":
+            return float(np.sqrt(s1 * s2))
+        # "global"
+        return s_default
+
+    # ----- stage 1: size-normalize -----
+    for aid in animal_ids:
+        if aid is None:
+            bps = [bp for bp in bodyparts if bp_to_aid.get(bp) is None]
+        else:
+            bps = [bp for bp in bodyparts if bp_to_aid.get(bp) == aid]
+
+        if not bps:
+            continue
+
+        s = s_by_aid[aid]
+
+        xy = [(bp, ax) for bp in bps for ax in ("x", "y") if (bp, ax) in out.columns]
+        if xy:
+            out.loc[:, xy] = out.loc[:, xy].to_numpy(float) / s
+
+        sp = [bp for bp in bps if bp in out.columns]  # speed columns are strings == bp
+        if sp:
+            out.loc[:, sp] = out.loc[:, sp].to_numpy(float) / s
+
+    for (bp1, bp2) in dist_cols:
+        a1, a2 = bp_to_aid.get(bp1), bp_to_aid.get(bp2)
+        if a1 == a2:
+            s = s_by_aid.get(a1, s_default)
+        else:
+            s = _comb(s_by_aid.get(a1, s_default), s_by_aid.get(a2, s_default))
+        out.loc[:, (bp1, bp2)] = out.loc[:, (bp1, bp2)].to_numpy(float) / s
+
+    if log_distances and dist_cols:
+        arr = out[dist_cols].to_numpy(float)
+        arr[arr < 0] = 0.0
+        out.loc[:, dist_cols] = np.log1p(arr)
+
+    if not standardize:
+        return out
+
+    # ----- stage 2: standardization -----
+    scaler_cls = {"standard": StandardScaler, "minmax": MinMaxScaler, "robust": RobustScaler}[scale]
+
+    def _fit_transform(cols, mode: Optional[str]):
+        if not cols or mode is None:
+            return
+        sc = scaler_cls()
+        if mode == "per_column":
+            out.loc[:, cols] = sc.fit_transform(out[cols].to_numpy(float))
+        elif mode == "groupwise":
+            arr = out[cols].to_numpy(float)
+            out.loc[:, cols] = sc.fit_transform(arr.reshape(-1, 1)).reshape(arr.shape)
+
+    # Speeds
+    _fit_transform(speed_cols, speed_standardize)
+
+    # Distances (groupwise separately for inner vs intra)
+    if dist_standardize == "per_column":
+        _fit_transform(dist_cols, "per_column")
+    elif dist_standardize == "groupwise":
+        _fit_transform(inner_dist_cols, "groupwise")
+        _fit_transform(intra_dist_cols, "groupwise")
+
+    # Coords
+    _fit_transform(coord_cols, coord_standardize)
+
+    return out
+
+
+
+def _pp_make_scaler(scale_kind: str):
+    SCALERS = {"standard": StandardScaler, "minmax": MinMaxScaler, "robust": RobustScaler}
+    if scale_kind not in SCALERS:
+        raise ValueError(f"Invalid scaler: {scale_kind}. Choose from {set(SCALERS.keys())}")
+    return SCALERS[scale_kind]()
+
+
+def _pp_sanitize_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """Interpolate NaNs and fill remaining gaps with zeros."""
+    out = df.copy()
+    num_cols = out.select_dtypes(include=[np.number]).columns
+    if len(num_cols) > 0:
+        out[num_cols] = out[num_cols].interpolate(limit_direction="both").fillna(0.0)
+    return out
+
+
+def _pp_load_and_prepare_table(
+    table_dict,
+    key: str,
+    bin_indices,
+    quality_to_load=None,
+) -> pd.DataFrame:
+    """Load table, apply binning, and optionally replace speeds with quality scores."""
+    tab = get_dt(table_dict, key).iloc[bin_indices]
+
+    if quality_to_load is not None:  # pragma: no cover
+        quality = get_dt(quality_to_load.filter_videos([key]), key)
+        shared_cols = list(set(tab.columns) & set(quality.columns))
+        if shared_cols:
+            tab[shared_cols] = quality[shared_cols].iloc[bin_indices]
+
+    return tab
+
+
+def _pp_filter_low_variance(tab: pd.DataFrame, filter_low_variance: Any) -> pd.DataFrame:
+    """Filter low-variance columns, preserving pheno columns."""
+    if not filter_low_variance:
+        return tab
+
+    keep_cols = (
+        list(np.where(tab.var(axis=0) > filter_low_variance)[0])
+        + list(np.where(["pheno" in str(col) for col in tab.columns])[0])
+    )
+    tab = tab.iloc[:, keep_cols]
+    assert len(tab.columns) > 0, (
+        "Error! During preprocessing the entire table was filtered out due to low variance!\n"
+        "This may happen due to an exceedingly high number of NaNs in the section chosen for preprocessing!"
+    )
+    return tab
+
+
+def _pp_init_empty_output_container(table_dict):
+    """Create empty output container matching the input TableDict type."""
+    try:
+        return type(table_dict)({}, table_dict._type, table_dict._table_path)
+    except Exception:  # pragma: no cover
+        table_temp = copy.deepcopy(table_dict)
+        for k in list(table_temp.keys()):
+            del table_temp[k]
+        return table_temp
+
+
+def _section_standardize(
+    *,
+    tab_local: pd.DataFrame,
+    samples: list,
+    cols: list,
+    ref_cols: Optional[list],
+    idx: np.ndarray,
+    mode: str,  # "per_column" or "groupwise"
+):
+    """
+    Append samples for a section (speeds / dists / coords) using either per-column (2D)
+    or groupwise (flattened 1D) sampling.
+
+    Returns:
+        ref_cols (possibly initialized) so caller can keep a stable per-column schema.
+    """
+    if not cols:
+        return ref_cols
+
+    if mode == "per_column":
+        if ref_cols is None:
+            ref_cols = cols
+        samples.append(
+            tab_local.iloc[idx].reindex(columns=ref_cols)[ref_cols].to_numpy(float)
+        )
+        return ref_cols
+
+    # groupwise
+    samples.append(tab_local.iloc[idx][cols].to_numpy(float).reshape(-1))
+    return ref_cols
+
+
+
+def _pp_pass1_collect_samples(
+    table_dict,
+    keys_list: List[str],
+    animal_ids,
+    bin_info: Dict[str, Any],
+    samples_max: int,
+    scale: Optional[str],
+    pretrained_scaler,
+    filter_low_variance: Any,
+    dist_standardize: Optional[str],
+    speed_standardize: Optional[str],
+    coord_standardize: Optional[str],
+    log_distances: bool,
+    quality_to_load=None,
+):
+    rng = np.random.RandomState(2)
+
+    samples_speed, samples_dist, samples_coord, samples_inner, samples_intra = [], [], [], [], []
+    ref_speed_cols, ref_dist_cols, ref_coord_cols = None, None, None
+    valid_keys: List[str] = []
+
+    with tqdm(
+        total=len(keys_list),
+        desc=f"{'Sampling':<{PROGRESS_BAR_FIXED_WIDTH}}",
+        unit="table",
+    ) as pbar:
+        for key in keys_list:
+            tab = _pp_load_and_prepare_table(
+                table_dict, key, bin_info[key], quality_to_load=quality_to_load
+            )
+
+            if tab.isna().all().all():
+                pbar.update()
+                continue
+
+            valid_keys.append(key)
+            tab = _pp_filter_low_variance(tab, filter_low_variance)
+
+            if scale and pretrained_scaler is None:
+                tab_local = deepof.utils.scale_table(
+                    tab,
+                    scale=scale,
+                    animal_ids=animal_ids,
+                    standardize=True,
+                    dist_standardize=dist_standardize,
+                    speed_standardize=speed_standardize,
+                    coord_standardize=None,
+                    log_distances=log_distances,
+                )
+
+                col_types = deepof.utils.infer_column_types(tab_local)
+
+                n_take = min(samples_max, len(tab_local))
+                if n_take > 0:
+                    idx = rng.choice(len(tab_local), size=n_take, replace=False)
+
+                    # Speeds
+                    if speed_standardize is not None and col_types["speeds"]:
+                        ref_speed_cols = _section_standardize(
+                            tab_local=tab_local,
+                            samples=samples_speed,
+                            cols=col_types["speeds"],
+                            ref_cols=ref_speed_cols,
+                            idx=idx,
+                            mode=speed_standardize,
+                        )
+
+                    # Distances (preserve original: groupwise -> inner and intra separately)
+                    if dist_standardize is not None and col_types["dists"]:
+                        if dist_standardize == "per_column":
+                            ref_dist_cols = _section_standardize(
+                                tab_local=tab_local,
+                                samples=samples_dist,
+                                cols=col_types["dists"],
+                                ref_cols=ref_dist_cols,
+                                idx=idx,
+                                mode="per_column",
+                            )
+                        else:  # groupwise
+                            if col_types["inner_dists"]:
+                                _section_standardize(
+                                    tab_local=tab_local,
+                                    samples=samples_inner,
+                                    cols=col_types["inner_dists"],
+                                    ref_cols=None,
+                                    idx=idx,
+                                    mode="groupwise",
+                                )
+                            if col_types["intra_dists"]:
+                                _section_standardize(
+                                    tab_local=tab_local,
+                                    samples=samples_intra,
+                                    cols=col_types["intra_dists"],
+                                    ref_cols=None,
+                                    idx=idx,
+                                    mode="groupwise",
+                                )
+
+                    # Coordinates
+                    coord_cols_local = [
+                        c for c in tab_local.columns
+                        if isinstance(c, tuple) and len(c) == 2 and c[1] in ("x", "y")
+                    ]
+                    if coord_standardize is not None and coord_cols_local:
+                        ref_coord_cols = _section_standardize(
+                            tab_local=tab_local,
+                            samples=samples_coord,
+                            cols=coord_cols_local,
+                            ref_cols=ref_coord_cols,
+                            idx=idx,
+                            mode=coord_standardize,
+                        )
+
+            pbar.update()
+
+    samples = {
+        "speed": samples_speed,
+        "dist": samples_dist,
+        "coord": samples_coord,
+        "inner": samples_inner,
+        "intra": samples_intra,
+    }
+    refs = {
+        "speed": ref_speed_cols,
+        "dist": ref_dist_cols,
+        "coord": ref_coord_cols,
+    }
+    return valid_keys, samples, refs
+
+
+def _pp_fit_global_scaler(
+    *,
+    scale: Optional[str],
+    pretrained_scaler,
+    samples: Dict[str, list],
+    dist_standardize: Optional[str],
+    speed_standardize: Optional[str],
+    coord_standardize: Optional[str],
+    log_distances: bool,
+):
+    """
+    Fit the global scalers (legacy output format).
+
+    Returns:
+        - pretrained_scaler as-is if provided
+        - None if no scaling requested
+        - legacy dict {kind, speed, dist, dist_inner, dist_intra, coord, ...} otherwise
+    """
+
+    def _fit_global_per_column(samples_2d):
+        if not samples_2d:
+            return None
+        sc = _pp_make_scaler(scale)
+        sc.fit(np.vstack(samples_2d))
+        return sc
+
+    def _fit_global_groupwise(samples_1d):
+        if not samples_1d:
+            return None
+        sc = _pp_make_scaler(scale)
+        sc.fit(np.concatenate(samples_1d).reshape(-1, 1))
+        return sc
+
+    if pretrained_scaler is not None:
+        return pretrained_scaler
+    if not scale:
+        return None
+
+    gs = GlobalScalerSpec(
+        kind=scale,
+        speed_mode=speed_standardize,
+        dist_mode=dist_standardize,
+        coord_mode=coord_standardize,
+        log_distances=log_distances,
+    )
+
+    # Speeds
+    if speed_standardize == "per_column":
+        gs.speed = _fit_global_per_column(samples["speed"])
+    elif speed_standardize == "groupwise":
+        gs.speed = _fit_global_groupwise(samples["speed"])
+
+    # Distances
+    if dist_standardize == "per_column":
+        gs.dist = _fit_global_per_column(samples["dist"])
+    elif dist_standardize == "groupwise":
+        gs.dist_inner = _fit_global_groupwise(samples["inner"])
+        gs.dist_intra = _fit_global_groupwise(samples["intra"])
+
+    # Coordinates
+    if coord_standardize == "per_column":
+        gs.coord = _fit_global_per_column(samples["coord"])
+    elif coord_standardize == "groupwise":
+        gs.coord = _fit_global_groupwise(samples["coord"])
+
+    if gs.is_effectively_empty():
+        return None
+
+    return gs.to_legacy_dict()
+
+
+def _pp_apply_global(
+    tab_scaled: pd.DataFrame,
+    *,
+    speed_standardize: Optional[str],
+    dist_standardize: Optional[str],
+    coord_standardize: Optional[str],
+    global_scaler,
+) -> pd.DataFrame:
+    """
+    Apply global scalers according to configured modes.
+
+    Note:
+        This mirrors the original preprocess implementation. It uses the mode arguments
+        rather than reading them back from global_scaler.
+    """
+    if global_scaler is None:
+        return tab_scaled
+
+    def _apply_1d(cols, scaler):
+        if not cols or scaler is None:
+            return
+        arr = tab_scaled[cols].to_numpy(float)
+        tab_scaled.loc[:, cols] = scaler.transform(arr.reshape(-1, 1)).reshape(arr.shape)
+
+    def _apply_2d(cols, scaler):
+        if not cols or scaler is None:
+            return
+        tab_scaled.loc[:, cols] = scaler.transform(tab_scaled[cols].to_numpy(float))
+
+    col_types = infer_column_types(tab_scaled)
+
+    # Speeds
+    if speed_standardize == "per_column":
+        _apply_2d(col_types["speeds"], global_scaler.get("speed"))
+    elif speed_standardize == "groupwise":
+        _apply_1d(col_types["speeds"], global_scaler.get("speed"))
+
+    # Distances
+    if dist_standardize == "per_column":
+        _apply_2d(col_types["dists"], global_scaler.get("dist"))
+    elif dist_standardize == "groupwise":
+        _apply_1d(col_types["inner_dists"], global_scaler.get("dist_inner"))
+        _apply_1d(col_types["intra_dists"], global_scaler.get("dist_intra"))
+
+    # Coordinates
+    coord_cols_apply = [
+        c
+        for c in tab_scaled.columns
+        if isinstance(c, tuple) and len(c) == 2 and c[1] in ("x", "y")
+    ]
+    if coord_standardize == "per_column":
+        _apply_2d(coord_cols_apply, global_scaler.get("coord"))
+    elif coord_standardize == "groupwise":
+        _apply_1d(coord_cols_apply, global_scaler.get("coord"))
+
+    return tab_scaled
+
+
+def _pp_pass2_scale_and_save(
+    table_dict,
+    *,
+    coordinates,
+    valid_keys: List[str],
+    bin_info: Dict[str, Any],
+    animal_ids,
+    scale: Optional[str],
+    global_scaler,
+    filter_low_variance: Any,
+    interpolate_normalized: int,
+    dist_standardize: Optional[str],
+    speed_standardize: Optional[str],
+    coord_standardize: Optional[str],
+    log_distances: bool,
+    file_name: str,
+    save_as_paths: bool,
+    quality_to_load=None,
+):
+    """
+    Pass 2: Apply scaling + clipping/interpolation + angle reattachment + saving.
+    """
+    table_temp = _pp_init_empty_output_container(table_dict)
+
+    with tqdm(
+        total=len(valid_keys),
+        desc=f"{'Scaling':<{PROGRESS_BAR_FIXED_WIDTH}}",
+        unit="table",
+    ) as pbar:
+        for key in valid_keys:
+            tab = _pp_load_and_prepare_table(
+                table_dict, key, bin_info[key], quality_to_load=quality_to_load
+            )
+            orig_cols = tab.columns
+
+            col_types = infer_column_types(tab)
+
+            # Separate angles (dimensionless; only need interpolation, not scaling)
+            angle_cols = col_types["angles"]
+            angles_df = tab[angle_cols].copy() if angle_cols else None
+            tab = tab.drop(columns=angle_cols, errors="ignore")
+
+            tab = _pp_filter_low_variance(tab, filter_low_variance)
+
+            # Apply full scaling (size + statistical)
+            if scale:
+                tab_local = scale_table(
+                    tab,
+                    scale=scale,
+                    animal_ids=animal_ids,
+                    standardize=True,
+                    dist_standardize=dist_standardize,
+                    speed_standardize=speed_standardize,
+                    coord_standardize=None,
+                    log_distances=log_distances,
+                )
+
+                tab = tab_local
+                tab = _pp_apply_global(
+                    tab,
+                    speed_standardize=speed_standardize,
+                    dist_standardize=dist_standardize,
+                    coord_standardize=coord_standardize,
+                    global_scaler=global_scaler,
+                )
+
+                # Clip outliers and interpolate (scalars + coords)
+                if scale == "standard" and interpolate_normalized:
+                    scalars = [c for c in col_types["scalars"] if c in tab.columns]
+                    coord_cols_clip = [
+                        c
+                        for c in tab.columns
+                        if isinstance(c, tuple) and len(c) == 2 and c[1] in ("x", "y")
+                    ]
+                    clip_cols = list(dict.fromkeys(scalars + coord_cols_clip))
+                    if clip_cols:
+                        arr = tab[clip_cols].to_numpy(float)
+                        arr[np.abs(arr) > interpolate_normalized] = np.nan
+                        tab[clip_cols] = pd.DataFrame(
+                            arr, index=tab.index, columns=clip_cols
+                        ).interpolate(limit_direction="both")
+
+            # Reattach interpolated angles
+            if angles_df is not None:
+                angles_df = angles_df.apply(pd.to_numeric, errors="ignore").interpolate(
+                    limit_direction="both"
+                )
+                tab = pd.concat([tab, angles_df], axis=1)
+
+            # Restore column order
+            tab = tab.reindex(columns=orig_cols)
+
+            # Save
+            table_path = os.path.join(table_dict._table_path, key, f"{key}_{file_name}")
+            table_temp[key] = save_dt(_pp_sanitize_numeric(tab).astype(coordinates._bit_precision.dtype), table_path, save_as_paths)
+
+            pbar.update()
+
+            # Column order safety check (as in original)
+            orig_cols2 = get_dt(table_dict, key).iloc[bin_info[key]].columns
+            new_cols2 = get_dt(table_temp, key).columns
+            assert list(orig_cols2) == list(new_cols2), "Column order changed during preprocessing!"
+
+    return table_temp
+    
+
+def kleinberg(
+    offsets: list, s: float = 2.0, gamma: float = 1.0, n=None, T=None, k=None
+):
+    """Apply Kleinberg's algorithm (described in 'Bursty and Hierarchical Structure in Streams').
+
+    The algorithm models activity bursts in a time series as an
+    infinite hidden Markov model.
+
+    Taken from pybursts (https://github.com/romain-fontugne/pybursts/blob/master/pybursts/pybursts.py)
+    and adapted for dependency compatibility reasons.
+
+    Args:
+        offsets (list): a list of time offsets (numeric)
+        s (float): the base of the exponential distribution that is used for modeling the event frequencies
+        gamma (float): coefficient for the transition costs between states
+        n: used to adjust the fixed cost function (not dependent of the given offsets). Which is needed if you want to compare bursts for different inputs.
+        T: used to adjust the fixed cost function (not dependent of the given offsets). Which is needed if you want to compare bursts for different inputs.
+        k: maximum burst level
+    """
+    if s <= 1:
+        raise ValueError("s must be greater than 1!")
+    if gamma <= 0:
+        raise ValueError("gamma must be positive!")
+    if not n is None and n <= 0:
+        raise ValueError("n must be positive!")
+    if not T is None and T <= 0:
+        raise ValueError("T must be positive!")
+    if len(offsets) < 1:
+        raise ValueError("offsets must be non-empty!")
+
+    offsets = np.array(offsets, dtype=object)
+
+    if offsets.size == 1:
+        bursts = np.array([0, offsets[0], offsets[0]], ndmin=2, dtype=object)
+        return bursts
+
+    offsets = np.sort(offsets)
+    gaps = np.diff(offsets).astype(np.float64)
+
+    if not np.all(gaps):
+        raise ValueError("Input cannot contain events with zero time between!")
+
+    if T is None:
+        T = np.sum(gaps)
+
+    if n is None:
+        n = np.size(gaps)
+
+    if k is None:
+        # number of hidden states. Changed to be not higher than 3
+        k = np.min(
+            [
+                6,
+                int(
+                    math.ceil(
+                        float(
+                            1
+                            + (math.log(T) / math.log(s))
+                            + (math.log(1.0 / np.amin(gaps)) / math.log(s))
+                        )
+                    )
+                ),
+            ]
+        )
+
+    # no run numba option here as this function gets called extremely often in the codeand is generally pretty slow
+    # slow core part of kleinberg
+    q = kleinberg_core_numba(
+        gaps, np.float64(s), np.float64(gamma), int(n), np.float64(T), int(k)
+    )
+
+    prev_q = 0
+
+    N = 0
+    for t in range(np.size(gaps)):
+        if q[t] > prev_q:
+            N = N + q[t] - prev_q
+        prev_q = q[t]
+
+    bursts = np.array(
+        [np.repeat(np.nan, N), np.repeat(offsets[0], N), np.repeat(offsets[0], N)],
+        ndmin=2,
+        dtype=object,
+    ).transpose()
+
+    burst_counter = -1
+    prev_q = 0
+    stack = np.zeros(int(N), dtype=int)
+    stack_counter = -1
+    for t in range(np.size(gaps)):
+        if q[t] > prev_q:
+            num_levels_opened = q[t] - prev_q
+            for i in range(int(num_levels_opened)):
+                burst_counter += 1
+                bursts[burst_counter, 0] = prev_q + i
+                bursts[burst_counter, 1] = offsets[t]
+                stack_counter += 1
+                stack[stack_counter] = int(burst_counter)
+        elif q[t] < prev_q:
+            num_levels_closed = prev_q - q[t]
+            for i in range(int(num_levels_closed)):
+                bursts[stack[stack_counter], 2] = offsets[t]
+                stack_counter -= 1
+        prev_q = q[t]
+
+    while stack_counter >= 0:
+        bursts[stack[stack_counter], 2] = offsets[np.size(gaps)]
+        stack_counter -= 1
+
+    return bursts
+
+
+@nb.njit()
+def kleinberg_core_numba(
+    gaps: np.array, s: np.float64, gamma: np.float64, n: int, T: np.float64, k: int
+) -> np.array:  # pragma: no cover
+    """Computation intensive core part of Kleinberg's algorithm (described in 'Bursty and Hierarchical Structure in Streams').
+
+        The algorithm models activity bursts in a time series as an
+        infinite hidden Markov model.
+
+        Taken from pybursts (https://github.com/romain-fontugne/pybursts/blob/master/pybursts/pybursts.py)
+        and rewritten for compatibility with numba.
+
+        Args:
+            gaps (np.array): an array of gap sizes between time offsets (numeric)
+            s (float): the base of the exponential distribution that is used for modeling the event frequencies
+            gamma (float): coefficient for the transition costs between states
+            n: used to adjust the fixed cost function (not dependent of the given offsets). Which is needed if you want to compare bursts for different inputs.
+            T: used to adjust the fixed cost function (not dependent of the given offsets). Which is needed if you want to compare bursts for different inputs.
+            k: maximum burst level / number of hidden states
+    :+
+    """
+    g_hat = T / n
+    gamma_log_n = gamma * math.log(n)
+
+    alpha = np.empty(k, dtype=np.float64)
+    for x in range(k):
+        alpha[x] = s**x / g_hat
+
+    C = np.repeat(np.inf, k)
+    C[0] = 0
+
+    q = np.empty((k, 0))
+    # iterate over all gap positions
+    for t in range(gaps.shape[0]):
+        C_prime = np.repeat(np.inf, k)
+        q_prime = np.empty((k, t + 1))
+        q_prime.fill(np.nan)
+
+        # iterate over all hidden states
+        for j in range(k):
+            cost = np.empty(k, dtype=np.float64)
+
+            # calculate cost for each new state
+            for i in range(k):
+                if i >= j:
+                    cost[i] = C[i]
+                else:
+                    cost[i] = C[i] + (j - i) * gamma_log_n
+
+            # state with minimum cost
+            el = np.argmin(cost)
+
+            # update Costs
+            if (alpha[j] * math.exp(-alpha[j] * gaps[t])) > 0:
+                C_prime[j] = cost[el] - math.log(
+                    alpha[j] * math.exp(-alpha[j] * gaps[t])
+                )
+
+            # update state squence
+            if t > 0:
+                q_prime[j, :t] = q[el, :]
+
+            # init next iteration of state sequence
+            q_prime[j, t] = j + 1
+
+        C = C_prime
+        q = q_prime
+
+    j = np.argmin(C)
+    q = q[j, :]
+    return q
+
+
+def smooth_boolean_array(
+    a: np.array, scale: int = 1, sigma = 2.0, batch_size: int = 50000
+) -> np.array:
+    """LEGACY FILTER FOR BEHAVIORAL ANALYSIS. REPLACED BY multi_step_paired_smoothing 
+    Return a boolean array in which isolated appearances of a feature are smoothed.
+
+        Args:
+            a (numpy.ndarray): Boolean instances.
+            scale (int): Kleinberg scale parameter. Higher values result in stricter smoothing.
+            batch_size (int): Batch size for input processing
+    
+        Returns:
+            a (numpy.ndarray): Smoothed boolean instances.
+
+    """
+
+    n = len(a)
+    a_smooth = np.zeros(n, dtype=bool)  # Initialize the output vector
+
+    # Process the input array in batches
+    for start in range(0, n, batch_size // 2):
+        end = min(start + batch_size, n)
+        batch = a[start:end]
+
+        # check if any behavior was detected
+        offsets = np.where(batch)[0]
+        if len(offsets) == 0:
+            continue  # skip batch if there was no detected activity
+
+        # Process the current batch
+        batch_bursts = kleinberg(offsets, gamma=0.3, s=sigma)
+
+        # Apply calculated smoothing to current batch
+        a_smooth_batch = np.zeros(np.size(batch), dtype=bool)
+        for i in batch_bursts:
+            if i[0] == scale:
+                a_smooth_batch[int(i[1]) : int(i[2])] = True
+
+        # Update the output vector with the results of the current batch
+        # Overwrite second half of last batch with new values to reduce "leakage"
+        a_smooth[start:end] = a_smooth_batch
+
+    return a_smooth
+
+
+def multi_step_paired_smoothing(
+        behavior_in: np.array,
+        not_behavior: np.array = None,
+        exclude: np.array =None,
+        min_length: int =6,
+        get_both: bool =False
+        ) -> np.array:
+    """This filtering approach will first gradually merge together very close behavioral instances (how close is regulated by min_length), 
+    then filter out remaining short instances. In this way multiple instances close to each other are kept and united and isolated very 
+    short bursts are filtered out. It replaces the kleinberg filtering approach with a similar idea as kleinberg was too susceptible to 
+    merge events together that were relatively distant on the time scale.
+
+        Args:
+            behavior_in (numpy.ndarray): Boolean instances of detected raw behavior.
+            not_behavior (numpy.ndarray): Boolean instances of raw behavior not occuring.
+            exclude (numpy.ndarray): Additional boolean instances that will always be rated as "no behavior".
+            min_length (int): Determines the degree of smoothing. The smaller, the more short behavioral instances are kept and the sharper the behavioral edges remain.
+            get_both (bool): If True, will also return the not_behavior instances that get smoothed along with the behavior instances.
+    
+        Returns:
+            behavior (numpy.ndarray): Smoothened boolean instances.
+            not_behavior (numpy.ndarray): Smoothened boolean not-behavior instances.
+
+    """
+
+    @nb.njit()
+    def _resolve_conflicts(behavior, not_behavior, behavior_avg, not_behavior_avg): # pragma: no cover
+        """Determines if conflicting frames (behavior and not_behavior are True) are either one or the other
+        based on the identity of surrounding frames represented by behavior_avg and not_behavior_avg"""
+        n = len(behavior)
+        for i in range(n):
+            if behavior[i] and not_behavior[i]:
+                if behavior_avg[i] >= not_behavior_avg[i]:
+                    not_behavior[i] = False
+                else:
+                    behavior[i] = False
+        return behavior, not_behavior
+    
+    if exclude is None:
+        exclude=np.ones(len(behavior_in)).astype(np.bool_)
+   
+    if not_behavior is None:
+        behavior = exclude & behavior_in.astype(np.bool_)
+        not_behavior = exclude & ~(behavior_in.astype(np.bool_))
+    else:
+        behavior = behavior_in.astype(np.bool_)
+
+    # Type corrections
+    if type(behavior) == pd.core.series.Series:
+        behavior = behavior.to_numpy()
+    if type(not_behavior) == pd.core.series.Series:
+        not_behavior = not_behavior.to_numpy()
+    if type(exclude) == pd.core.series.Series:
+        exclude = exclude.to_numpy()
+
+    #widens all behavior detections
+    behavior = moving_average(behavior, lag=min_length).astype(np.bool_)
+    not_behavior = moving_average(not_behavior, lag=min_length).astype(np.bool_)
+
+    # Due to the widening step, it will happen that frames are simutaneously beheavior and not behavior.
+    # To resolve these conflicts, first run a larger moving average giving float values as a "percentage" of activeness / passiveness
+    behavior_avg = moving_average(behavior, lag=min_length*4).astype(float)
+    not_behavior_avg = moving_average(not_behavior, lag=min_length*4).astype(float)
+
+    # Then resolve these conflicting frames based on their surrounding frames
+    behavior, not_behavior = _resolve_conflicts(behavior, not_behavior, behavior_avg, not_behavior_avg) #merges close blcoks and narrows blocks
+    
+    # Re-apply exclude mask to re-sharpen edges
+    behavior &= exclude
+    not_behavior &= exclude
+    
+    # To ensure that sections are labeled more consistently as either behavior or not_behavior (with less not_behavior blips during behavior), 
+    # use a moving median to get rid of very short not_behavior detections in behavior sections, then adjust not_behavior Frames accordingly
+    behavior_med = binary_moving_median_numba(behavior.astype(np.float64), lag=min_length * 4 + 1) #widens blocks
+    behavior = (behavior_med >= 0.5).astype(np.bool_)
+    
+    # Remove overlaps
+    overlap = not_behavior & behavior
+    not_behavior[overlap] = False
+    
+    # Filter short segments.
+    behavior = filter_short_true_segments_numba(behavior, min_length)
+    not_behavior = filter_short_true_segments_numba(not_behavior, min_length) #removes short blocks
+    
+    # Final exclude mask
+    behavior &= exclude
+    not_behavior &= exclude
+    
+    if get_both:
+        return behavior, not_behavior
+    else:
+        return behavior
+    
+
+def rolling_window(
+    a: np.ndarray,
+    window_size: int,
+    window_step: int,
+) -> np.ndarray:
+    """Return a 3D numpy.array with a sliding-window extra dimension.
+
+    Args:
+        a (np.ndarray): N (instances) * m (features) shape
+        window_size (int): Size of the window to apply
+        window_step (int): Step of the window to apply
+
+    Returns:
+        rolled_a (np.ndarray): N (sliding window instances) * l (sliding window size) * m (features)
+
+    """
+
+    shape = (a.shape[0] - window_size + 1, window_size) + a.shape[1:]
+    strides = (a.strides[0],) + a.strides
+    rolled_a = np.lib.stride_tricks.as_strided(
+        a, shape=shape, strides=strides, writeable=True
+    )[::window_step]
+
+    return rolled_a
+
+
+def extract_windows(
+    to_window: table_dict,
+    window_size: int,
+    window_step: int,
+    save_as_paths: bool = False,
+    shuffle: bool = False,
+    aggregate: str = None,
+    windows_desc : str = "Get windows"
+) -> np.ndarray:
+    """Apply the rupture method independently to each experiment, and concatenate into a single dataset at the end.
+
+    Returns a dataset and the rupture indices, adapted to be used in a concatenated version
+    of the labels.
+
+    Args:
+        to_window (table_dict): table_dict with all experiments.
+        window_size (int): specifies the length of the sliding window.
+        window_step (int): specifies the stride of the sliding window.
+        save_as_paths (bool): save result as paths in dictionary instead of keeping it in RAM
+        shuffle (bool): Whether to shuffle the data for each dataset. Defaults to False.
+        aggregate (str): Aggregate  Instead of extracting full windows. Extracts full windows if none (default), otherwise options are:
+            "mean" : average windows to one value
+            "mid" : take middle of windows as window value
+            "wta" : winner takes all: whatever behavior or behavior combination is the most frequent is set as the window value
+            "lta" : loser takes all: whatever behavior or behavior combination is the rarest is set as the window value
+        windows_desc (str): Progress bar label
+
+    Returns:
+        to_window (dict): Dictionary containing stacks of windowed data samples for each table. Shape of the stacks: [N_samples, window_size, N_features]
+        output_shape (Tuple): shape of the output array (N_samples, window_size, N_features).
+
+    """   
+    # Iterate over all experiments and populate them
+    out_len=0
+    window_len=0
+    n_features=0
+
+    with tqdm(total=len(to_window.keys()), desc=f"{windows_desc:<{PROGRESS_BAR_FIXED_WIDTH}}", unit="table") as pbar:
+        for key in to_window.keys():
+                            
+            #load tab from disk if not already loaded
+            tab, tab_path = get_dt(to_window, key, True) 
+            if isinstance(tab_path, dict):
+                duckdb_file = tab_path.get("duckdb_file")
+                table = tab_path.get("table")
+                dir_path = os.path.dirname(duckdb_file) 
+                tab_path = os.path.join(dir_path, table)  
+            tab=np.array(tab)
+
+            tab = rolling_window(
+                tab,
+                window_size,
+                window_step,
+            )
+            # Extrakt raw windows
+            if aggregate is None:
+                pass
+            # take mid point of window as label
+            elif aggregate=="mid":
+                mid = tab.shape[1] // 2
+                tab=tab[:, mid:mid+1, :]  
+            # take average of window as label
+            elif aggregate=="mean":
+                tab=tab.mean(axis=1)
+                tab = tab[:, None, :]
+
+            # winner takes all, whole window is set to most frequent class    
+            elif aggregate=="wta":
+                tab, _ = mode(tab, axis=1)
+                if len(tab.shape)==2:
+                    tab = tab[:, None, :]
+            elif aggregate=="lta":
+                N, W, D = tab.shape
+
+                tab_loser = np.empty([N,1,D], dtype=int)
+                for i in range(N):
+                    rows, counts = np.unique(tab[i], return_counts=True, axis=0)
+                    tab_loser[i,:] = rows[np.argmin(counts)]  # least frequent slice
+                tab = tab_loser
+
+            if shuffle:
+                shuffle_idcs = np.random.choice(
+                    tab.shape[0], tab.shape[0], replace=False
+                )
+                tab = tab[shuffle_idcs]
+
+            out_len=out_len+tab.shape[0]
+            window_len=tab.shape[1]
+            n_features=tab.shape[2]
+            to_window[key] = save_dt(tab,tab_path,save_as_paths)
+            pbar.update()
+
+
+    output_shape=(out_len,window_len,n_features)
+    return to_window, output_shape
+
+
+def smooth_mult_trajectory(
+    series: np.array, alpha: int = 0, w_length: int = 15
+) -> np.ndarray:
+    """Return a smoothed a trajectory using a Savitzky-Golay 1D filter.
+
+    Args:
+        series (numpy.ndarray): 1D trajectory array with N (instances)
+        alpha (int): 0 <= alpha < w_length; indicates the difference between the degree of the polynomial and the window length for the Savitzky-Golay filter used for smoothing. Higher values produce a worse fit, hence more smoothing.
+        w_length (int): Length of the sliding window to which the filter fit. Higher values yield a coarser fit, hence more smoothing.
+
+    Returns:
+        smoothed_series (np.ndarray): smoothed version of the input, with equal shape
+
+    """
+    if alpha is None:
+        return series
+
+    # apply filter
+    smoothed_series = savgol_filter(
+        series, polyorder=(w_length - alpha), window_length=w_length, axis=0
+    )
+
+    assert smoothed_series.shape == series.shape
+
+    return smoothed_series
+
+
+def moving_average(time_series: pd.Series, lag: int = 5) -> pd.Series:
+    """Fast implementation of a moving average function.
+
+    Args:
+        time_series (pd.Series): Uni-variate time series to take the moving average of.
+        lag (int): size of the convolution window used to compute the moving average.
+
+    Returns:
+        moving_avg (pd.Series): Uni-variate moving average over time_series.
+
+    """
+    moving_avg = np.convolve(time_series, np.ones(lag) / lag, mode="same")
+    
+    return moving_avg
+
+@nb.njit()
+def binary_moving_median_numba(time_series, lag): # pragma: no cover
+    """will applay a moving median like filter on a binary signal, i.e. if a window of size lag 
+    has more 1s than 0s set the frame to 1 for that window, set it to 0 otherwise. 
+    Will only work for windows of uneven length N i.e. returns the same for lag=N and lag=N+1"""
+    pad = (lag - 1) // 2
+    padded = np.zeros(len(time_series), dtype=np.bool_)
+    for i in range(pad,len(time_series)-pad):
+        s = 0
+        for k in time_series[i-pad:i+pad+1]:
+            if k:
+                s += 1
+        padded[i] = s > pad
+
+    return padded
+
+
+def mask_outliers(
+    time_series: pd.DataFrame,
+    likelihood: pd.DataFrame,
+    likelihood_tolerance: float,
+    lag: int,
+    n_std: int,
+    mode: str,
+) -> pd.DataFrame:
+    """Return a mask over the bivariate trajectory of a body part, identifying as True all detected outliers.
+
+    An outlier can be marked with one of two criteria: 1) the likelihood reported by DLC is below likelihood_tolerance,
+    and/or 2) the deviation from a moving average model is greater than n_std.
+
+    Args:
+        time_series (pd.DataFrame): Bi-variate time series representing the x, y positions of a single body part
+        likelihood (pd.DataFrame): Data frame with likelihood data per body part as extracted from deeplabcut
+        likelihood_tolerance (float): Minimum tolerated likelihood, below which an outlier is called
+        lag (int): Size of the convolution window used to compute the moving average
+        n_std (int): Number of standard deviations over the moving average to be considered an outlier
+        mode (str): If "and" (default) both x and y have to be marked in order to call an outlier. If "or", one is enough.
+
+    Returns
+        mask (pd.DataFrame): Bi-variate mask over time_series. True indicates an outlier.
+
+    """
+    moving_avg_x = moving_average(time_series["x"], lag)
+    moving_avg_y = moving_average(time_series["y"], lag)
+
+    residuals_x = time_series["x"] - moving_avg_x
+    residuals_y = time_series["y"] - moving_avg_y
+
+    outlier_mask_x = np.abs(residuals_x) > np.mean(
+        residuals_x[lag:-lag]
+    ) + n_std * np.std(residuals_x[lag:-lag])
+    outlier_mask_y = np.abs(residuals_y) > np.mean(
+        residuals_y[lag:-lag]
+    ) + n_std * np.std(residuals_y[lag:-lag])
+    outlier_mask_l = likelihood < likelihood_tolerance
+    mask = None
+
+    if mode == "and":
+        mask = (outlier_mask_x & outlier_mask_y) | outlier_mask_l
+    elif mode == "or":
+        mask = (outlier_mask_x | outlier_mask_y) | outlier_mask_l
+
+    return mask
+
+
+def full_outlier_mask(
+    experiment: pd.DataFrame,
+    likelihood: pd.DataFrame,
+    likelihood_tolerance: float,
+    exclude: str,
+    lag: int,
+    n_std: int,
+    mode: str,
+) -> pd.DataFrame:
+    """Iterate over all body parts of experiment, and outputs a dataframe where all x, y positions are replaced by a boolean mask, where True indicates an outlier.
+
+    Args:
+        experiment (pd.DataFrame): Data frame with time series representing the x, y positions of every body part
+        likelihood (pd.DataFrame): Data frame with likelihood data per body part as extracted from deeplabcut
+        likelihood_tolerance (float): Minimum tolerated likelihood, below which an outlier is called
+        exclude (str): Body part to exclude from the analysis (to concatenate with bpart alignment)
+        lag (int): Size of the convolution window used to compute the moving average
+        n_std (int): Number of standard deviations over the moving average to be considered an outlier
+        mode (str): If "and" (default) both x and y have to be marked in order to call an outlier. If "or", one is enough.
+
+    Returns:
+        full_mask (pd.DataFrame): Mask over all body parts in experiment. True indicates an outlier
+
+    """
+    body_parts = experiment.columns.levels[0]
+    full_mask = experiment.copy()
+
+    if exclude:
+        full_mask.drop(exclude, axis=1, inplace=True)
+
+    for bpart in body_parts:
+        if bpart != exclude:
+            mask = mask_outliers(
+                experiment[bpart],
+                likelihood[bpart],
+                likelihood_tolerance,
+                lag,
+                n_std,
+                mode,
+            )
+
+            full_mask.loc[:, (bpart, "x")] = mask
+            full_mask.loc[:, (bpart, "y")] = mask
+            continue
+
+    return full_mask
+
+
+def remove_outliers(
+    experiment: pd.DataFrame,
+    likelihood: pd.DataFrame,
+    likelihood_tolerance: float,
+    exclude: str = "",
+    lag: int = 5,
+    n_std: int = 3,
+    mode: str = "or",
+) -> pd.DataFrame:
+    """Mark all outliers in experiment and replaces them using a uni-variate linear interpolation approach.
+
+    Note that this approach only works for equally spaced data (constant camera acquisition rates).
+
+    Args:
+        experiment (pd.DataFrame): Data frame with time series representing the x, y positions of every body part.
+        likelihood (pd.DataFrame): Data frame with likelihood data per body part as extracted from deeplabcut.
+        likelihood_tolerance (float): Minimum tolerated likelihood, below which an outlier is called.
+        exclude (str): Body part to exclude from the analysis (to concatenate with bpart alignment).
+        lag (int): Size of the convolution window used to compute the moving average.
+        n_std (int): Number of standard deviations over the moving average to be considered an outlier.
+        mode (str): If "and" both x and y have to be marked in order to call an outlier. If "or" (default), one is enough.
+
+    Returns:
+        interpolated_exp (pd.DataFrame): Interpolated version of experiment.
+
+    """
+    interpolated_exp = experiment.copy()
+
+    # Creates a mask marking all outliers
+    mask = full_outlier_mask(
+        experiment, likelihood, likelihood_tolerance, exclude, lag, n_std, mode
+    )
+    warn_nans=False
+    if np.sum(np.sum(mask))/np.prod(mask.shape) > 0.3:
+        warn_nans=True
+
+
+    interpolated_exp[mask] = np.nan
+
+    return interpolated_exp, warn_nans
+
+
+def filter_animal_id_in_table(table: pd.DataFrame, selected_id: str = None, table_type: str = None):
+    """Filter a DataFrame to keep only those columns related to the selected id.
+
+    Leave labels untouched if present.
+
+    Args:
+        table (pd.DataFrame): a dataFrame to be filtered
+        selected_id (str): select a single animal on multi animal settings. Defaults to None (all animals are processed).
+        table_type (str): type of the tableDict
+
+    Returns:
+        pd.DataFrame: Filtered dataFrame, keeping only the selected animal.
+    """
+
+    #filter columns, only keep the ones having a specific animal id    
+    columns_to_keep = filter_columns(table.columns, selected_id, table_type=table_type)
+    table = table.loc[
+        :, [bpa for bpa in table.columns if bpa in columns_to_keep]
+    ]
+
+    return table
+
+
+def filter_columns(columns: list, selected_id: str, table_type:str = None) -> list:
+    """Given a set of TableDict columns, returns those that correspond to a given animal, specified in selected_id.
+
+    Args:
+        columns (list): List of columns to filter.
+        selected_id (str): Animal ID to filter for.
+        table_type (str): Type of the table (relevant if "supervised")
+
+    Returns:
+        filtered_columns (list): List of filtered columns.
+
+    """
+    if selected_id is None:
+        return columns
+
+    columns_to_keep = []
+    for column in columns:
+        # Speed transformed columns
+        if selected_id == "supervised" and column in [ #maybe bug but need to confirm
+            "nose2nose",
+            "sidebyside",
+            "sidereside",
+        ]:
+            columns_to_keep.append(column)
+        if type(column) == str and table_type=="supervised" and selected_id in column:
+            columns_to_keep.append(column)
+        elif type(column) == str and column.startswith(selected_id):
+            columns_to_keep.append(column)
+        # Raw coordinate columns
+        if column[0].startswith(selected_id) and column[1] in ["x", "y", "rho", "phi"]:
+            columns_to_keep.append(column)
+        # Raw distance and angle columns
+        elif len(column) in [2, 3] and all([i.startswith(selected_id) for i in column]):
+            columns_to_keep.append(column)
+        elif column[0].lower().startswith("pheno"):
+            columns_to_keep.append(column)
+
+    return columns_to_keep
+
+
+@deepof.data_loading._suppress_warning(
+    warn_messages=[
+        "Trying to unpickle estimator StandardScaler from version 1.2.0 when using version 1.7.2.",
+        "Trying to unpickle estimator NearestNeighbors from version 1.2.0 when using version 1.7.2."
+    ]
+)
+def load_precompiled_model(path, download_path, model_path, model_name):
+    """Loads model for automatic arena segmentation"""
+
+    model_url = download_path
+
+    if path is None:
+        installation_path = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(
+            installation_path,
+            model_path
+        )
+
+    if not os.path.exists(path):
+        # Creating directory if it does not exist
+        directory = os.path.dirname(path)
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+
+        print(model_name + " not found. Downloading...")
+
+        response = requests.get(model_url, stream=True)
+        response.raise_for_status()
+
+        with open(path, "wb") as file:
+            total_length = int(response.headers.get("content-length"))
+            for chunk in tqdm(
+                response.iter_content(chunk_size=1024),
+                total=total_length // 1024,
+                unit="KB",
+            ):
+                if chunk:
+                    file.write(chunk)
+
+    # Arena segemntation model
+    if path.endswith(".pth"):
+        # Load the model using PyTorch
+        sam = sam_model_registry["vit_h"](checkpoint=path)
+        sam.to(device="cpu")
+        predictor = SamPredictor(sam)
+    # Immobility estimator model
+    elif path.endswith(".pkl"):
+        predictor = deepof.legacy_smote_handling.load_pickle_compat(path)
+    return predictor
+
+
+def rolling_speed(
+    dframe: pd.DatetimeIndex,
+    frame_rate: int = 1,
+    window: int = 3,
+    rounds: int = 3,
+    deriv: int = 1,
+    shift: int = 2,
+    typ: str = "coords",
+) -> pd.DataFrame:
+    """Return the average speed over n frames in millimeters per second.
+
+    Args:
+        dframe (pandas.DataFrame): Position over time dataframe.
+        frame_rate (int): Number of frames per second.
+        window (int): Number of frames to average over.
+        rounds (int): Float rounding decimals.
+        deriv (int): Position derivative order; 1 for speed, 2 for acceleration, 3 for jerk, etc.
+        shift (int): Window shift for rolling speed calculation.
+        typ (str): Type of dataset. Intended for internal usage only.
+
+    Returns:
+        speeds (pd.DataFrame): Data frame containing 2D speeds for each body part in the original data or their consequent derivatives.
+
+    """
+    original_shape = dframe.shape
+    if type(dframe.columns) == pd.MultiIndex:
+        #"levels" seems to be bugged and still finds columns that are not included in the datframe anymore
+        body_parts = [column[0] for column in dframe.columns]
+        body_parts = np.array(body_parts)[np.unique(body_parts, return_index=True)[1]]
+    else:
+        body_parts = dframe.columns
+
+    speeds = pd.DataFrame
+
+    for der in range(deriv):
+        features = 2 if der == 0 and typ == "coords" else 1
+
+        distances = (
+            np.concatenate(
+                [
+                    np.array(dframe).reshape([-1, features], order="C"),
+                    np.array(dframe.shift(shift)).reshape([-1, features], order="C"),
+                ],
+                axis=1,
+            )
+            / shift
+        )
+
+        distances = np.array(compute_dist(distances))
+        distances = distances.reshape(
+            [
+                original_shape[0],
+                (original_shape[1] // 2 if typ == "coords" else original_shape[1]),
+            ],
+            order="C",
+        )
+        distances = pd.DataFrame(distances, index=dframe.index)
+        speeds = np.round(distances.rolling(window).mean(), rounds)
+        del dframe
+        dframe = speeds
+
+    # Speed is in mm per frame
+    speeds.columns = body_parts
+
+    # Convert to mm per second
+    speeds *= frame_rate
+
+
+
+    return speeds#.fillna(0.0)
+
+
+def get_behavior_mask_and_confidence(
+    tab: Union[pd.DataFrame],
+    behaviors: List[str],  
+    supervised_export: bool,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:  # Changed return type to DataFrame
+    """Generates a boolean mask and a confidence dataframe for given behaviors.
+
+    Args:
+        tab (Union[pd.DataFrame]): Table with supervised or unsupervised behaviors, converted to a data frame.
+        behaviors (List(str)): List of behavior names.
+        supervised_export (bool): Does the given table contain supervised or unsupervised behaviors? 
+
+    Returns:
+        np.ndarray: Mask of confidence indices to keep.
+
+    """
+    
+    # Guards
+    if type(behaviors)==str:
+        behaviors=[behaviors]
+    if type(tab)==pd.DataFrame:
+        assert all([behavior in list(tab.columns) for behavior in behaviors]), "Error! Some of the given behavior names do not exist within the behavior data table!"
+
+    # In supervised case, allow multiple behaviors at once
+    if supervised_export:
+        df = tab.copy()
+        mask = df[behaviors] > 0.1
+        confidence = df[behaviors]
+    # In unsupervised case, only identify most likely behavior
+    else:
+        most_likely_behavior = tab.idxmax(axis=1)
+        df = pd.DataFrame(tab, columns=behaviors)
+        # Build a mask DataFrame where each column is True only if that
+        # behavior was the most likely one for that row.
+        mask = pd.DataFrame(
+            {b: (most_likely_behavior == b) for b in behaviors}
+        )
+        confidence = df[behaviors]
+    return mask, confidence
+
+
+
+def row_nanargmax(arr):
+    """argmax per row, ignoring NaNs. Returns NaN for all-NaN rows."""
+    mask = np.all(np.isnan(arr), axis=1)
+    result = np.nanargmax(np.where(mask[:, None], 0, arr), axis=1).astype(float)
+    result[mask] = np.nan
+    return result
+
+
+def filter_short_bouts(
+    cluster_assignments: np.ndarray,
+    cluster_confidence: np.ndarray,
+    confidence_indices: np.ndarray,
+    min_confidence: float = 0.0,
+    min_bout_duration: int = None,
+):  # pragma: no cover
+    """Filter out cluster assignment bouts shorter than min_bout_duration.
+
+    Args:
+        cluster_assignments (np.ndarray): Array of cluster assignments.
+        cluster_confidence (np.ndarray): Array of cluster confidence values.
+        confidence_indices (np.ndarray): Array of confidence indices.
+        min_confidence (float): Minimum confidence value.
+        min_bout_duration (int): Minimum bout duration in frames.
+
+    Returns:
+        np.ndarray: Mask of confidence indices to keep.
+
+    """
+    # Compute bout lengths, and filter out bouts shorter than min_bout_duration
+    bout_lengths = np.diff(
+        np.where(
+            np.diff(np.concatenate([[np.inf], cluster_assignments, [np.inf]])) != 0
+        )[0]
+    )
+
+    if min_bout_duration is None:
+        min_bout_duration = np.mean(bout_lengths)
+
+    confidence_indices[
+        np.repeat(bout_lengths, bout_lengths) < min_bout_duration
+    ] = False
+
+    # Compute average confidence per bout
+    cum_bout_lengths = np.concatenate([[0], np.cumsum(bout_lengths)])
+
+    bout_average_confidence = np.array(
+        [
+            cluster_confidence[cum_bout_lengths[i] : cum_bout_lengths[i + 1]].mean()
+            if np.any(confidence_indices[cum_bout_lengths[i] : cum_bout_lengths[i + 1]])
+            else float("nan")
+            for i in range(len(bout_lengths))
+        ]
+    )
+
+    return (np.repeat(bout_average_confidence, bout_lengths) >= min_confidence) & (
+        confidence_indices
+    )
+
+
+def filter_short_true_segments(array: np.ndarray, min_length: int):
+    """Filters out sahort "True" sections from boolean array "array"
+
+    Args:
+        array (np.ndarray): Boolean array
+        min_length (int): Minimum length of "true" sections within array.
+
+    Returns:
+        np.ndarray: Mask of confidence indices to keep.
+
+    """
+    
+    #inits 
+    n = len(array)
+    output_array = np.zeros(n, dtype=np.bool_)
+    count = 0
+    in_segment = False
+    
+    for i in range(n):
+        if array[i]:
+            count += 1
+            in_segment = True
+        else:
+            if in_segment:
+                # Check count if True-segment ends
+                if count >= min_length:
+                    output_array[i - count:i] = True
+                # Reset count and segment flag
+                count = 0
+                in_segment = False
+    
+    # Check for a segment that may end at the last element
+    if in_segment and count >= min_length:
+        output_array[n - count:n] = True
+    
+    return output_array
+
+
+@nb.njit()
+def filter_short_true_segments_numba(array: np.ndarray, min_length: int): # pragma: no cover
+    """Filters out sahort "True" sections from boolean array "array"
+
+    Args:
+        array (np.ndarray): Boolean array
+        min_length (int): Minimum length of "true" sections within array.
+
+    Returns:
+        np.ndarray: Mask of confidence indices to keep.
+
+    """
+    
+    #inits 
+    n = len(array)
+    output_array = np.zeros(n, dtype=np.bool_)
+    count = 0
+    in_segment = False
+    
+    for i in range(n):
+        if array[i]:
+            count += 1
+            in_segment = True
+        else:
+            if in_segment:
+                # Check count if True-segment ends
+                if count >= min_length:
+                    output_array[i - count:i] = True
+                # Reset count and segment flag
+                count = 0
+                in_segment = False
+    
+    # Check for a segment that may end at the last element
+    if in_segment and count >= min_length:
+        output_array[n - count:n] = True
+    
+    return output_array
+
+# MACHINE LEARNING FUNCTIONS #
+
+
+def gmm_compute(x: np.array, n_components: int, cv_type: str) -> list:
+    """Fit a Gaussian Mixture Model to the provided data and returns evaluation metrics.
+
+    Args:
+        x (numpy.ndarray): Data matrix to train the model
+        n_components (int): Number of Gaussian components to use
+        cv_type (str): Covariance matrix type to use. Must be one of "spherical", "tied", "diag", "full".
+
+    Returns:
+        - gmm_eval (list): model and associated BIC for downstream selection.
+
+    """
+    gmm = mixture.GaussianMixture(
+        n_components=n_components,
+        covariance_type=cv_type,
+        max_iter=100000,
+        init_params="kmeans",
+    )
+    gmm.fit(x)
+    gmm_eval = [gmm, gmm.bic(x)]
+
+    return gmm_eval
+
+
+def gmm_model_selection(
+    x: pd.DataFrame,
+    n_components_range: range,
+    part_size: int,
+    n_runs: int = 100,
+    n_cores: int = False,
+    cv_types: Tuple = ("spherical", "tied", "diag", "full"),
+) -> Tuple[List[list], List[np.ndarray], Union[int, Any]]:
+    """Run GMM clustering model selection on the specified X dataframe.
+
+    Outputs the bic distribution per model, a vector with the median BICs and an object with the overall best model.
+
+    Args:
+        x (pandas.DataFrame): Data matrix to train the models
+        n_components_range (range): Generator with numbers of components to evaluate
+        part_size (int): Size of bootstrap samples for each model
+        n_runs (int): Number of bootstraps for each model
+        n_cores (int): Number of cores to use for computation
+        cv_types (tuple): Covariance Matrices to try. All four available by default
+
+    Returns:
+        - bic (list): All recorded BIC values for all attempted parameter combinations (useful for plotting).
+        - m_bic(list): All minimum BIC values recorded throughout the process (useful for plottinh).
+        - best_bic_gmm (sklearn.GMM): Unfitted version of the best found model.
+
+    """
+    # Set the default of n_cores to the most efficient value
+    if not n_cores:
+        n_cores = min(multiprocessing.cpu_count(), n_runs)
+
+    bic = []
+    m_bic = []
+    lowest_bic = np.inf
+    best_bic_gmm = 0
+
+    pbar = tqdm(total=len(cv_types) * len(n_components_range))
+
+    for cv_type in cv_types:
+
+        for n_components in n_components_range:
+
+            res = Parallel(n_jobs=n_cores, prefer="threads")(
+                delayed(gmm_compute)(
+                    x.sample(part_size, replace=True), n_components, cv_type
+                )
+                for _ in range(n_runs)
+            )
+            bic.append([i[1] for i in res])
+
+            pbar.update(1)
+            m_bic.append(np.median([i[1] for i in res]))
+            if m_bic[-1] < lowest_bic:
+                lowest_bic = m_bic[-1]
+                best_bic_gmm = res[0][0]
+
+    return bic, m_bic, best_bic_gmm
+
+
+def compute_compactness(
+    Z_pos: np.ndarray,
+    Z_all: np.ndarray,
+    eps: float = 1e-12,
+) -> Dict[str, float]:
+    """Compute compactness of positive-class embeddings relative to all embeddings.
+
+    Uses the trace of the covariance matrix as a spread measure.  Lower values
+    indicate tighter clustering of positive samples.
+
+    Args:
+        Z_pos: Positive-class embeddings, shape (N_pos, D).
+        Z_all: All embeddings, shape (N_all, D).
+        eps: Guard against division by zero.
+
+    Returns:
+        dict: ``trace_cov_pos`` – absolute trace covariance of positives;
+              ``trace_cov_pos_norm_global`` – ratio of positive to global trace.
+    """
+    tr_p = float(np.trace(np.cov(Z_pos.astype(np.float64, copy=False), rowvar=False)))
+    tr_a = float(np.trace(np.cov(Z_all.astype(np.float64, copy=False), rowvar=False)))
+    return {"trace_cov_pos": tr_p, "trace_cov_pos_norm_global": tr_p / max(eps, tr_a)}
+
+
+def compute_separability_logreg(
+    X: np.ndarray,
+    y: np.ndarray,
+    n_splits: int = 5,
+    seed: int = 0,
+    C: float = 1.0,
+    max_train: int = 100_000,
+) -> Dict[str, float]:
+    """Compute class separability via logistic-regression average precision (AP).
+
+    Performs stratified *k*-fold cross-validation with a balanced logistic
+    regression classifier and returns mean ± std of the AP score.
+
+    Args:
+        X: Feature matrix, shape (N, D).
+        y: Binary labels in {0, 1}, shape (N,).
+        n_splits: Number of CV folds.
+        seed: Random seed for reproducibility.
+        C: Inverse regularisation strength.
+        max_train: Maximum samples used (balanced subsample).
+
+    Returns:
+        dict: ``ap_mean``, ``ap_std``, ``n_used``.  Values are NaN when only
+              one class is present.
+    """
+    yb = (y > 0.5).astype(np.int32)
+    if yb.min() == yb.max():
+        return {"ap_mean": float("nan"), "ap_std": float("nan"), "n_used": 0}
+
+    rng = np.random.default_rng(seed)
+    idx_pos, idx_neg = np.where(yb == 1)[0], np.where(yb == 0)[0]
+    n_pos, n_neg = len(idx_pos), len(idx_neg)
+    n_target = min(max_train, n_pos + n_neg)
+    n_pos_t = int(round(n_target * n_pos / (n_pos + n_neg)))
+    n_neg_t = n_target - n_pos_t
+
+    idx = np.concatenate([
+        rng.choice(idx_pos, size=min(n_pos_t, n_pos), replace=False),
+        rng.choice(idx_neg, size=min(n_neg_t, n_neg), replace=False),
+    ])
+    rng.shuffle(idx)
+
+    Xs, ys = X[idx].astype(np.float64), yb[idx]
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    aps = []
+    for tr, te in skf.split(Xs, ys):
+        sc = StandardScaler()
+        Xtr, Xte = sc.fit_transform(Xs[tr]), sc.transform(Xs[te])
+        clf = LogisticRegression(C=C, max_iter=2000, class_weight="balanced", solver="lbfgs")
+        clf.fit(Xtr, ys[tr])
+        aps.append(average_precision_score(ys[te], clf.predict_proba(Xte)[:, 1]))
+
+    return {"ap_mean": float(np.mean(aps)), "ap_std": float(np.std(aps)), "n_used": int(len(idx))}
+
+
+def compute_knn_agreement(
+    X: np.ndarray,
+    y: np.ndarray,
+    k: int = 25,
+    seed: int = 0,
+    max_points: int = 50_000,
+    max_pos_queries: int = 10_000,
+    metric: str = "cosine",
+) -> Dict[str, float]:
+    """Compute kNN label agreement for positive-class samples.
+
+    For each positive sample, reports the fraction of its *k* nearest neighbours
+    that are also positive.  Higher values indicate better clustering.
+
+    Args:
+        X: Feature matrix, shape (N, D).
+        y: Binary labels in {0, 1}, shape (N,).
+        k: Number of nearest neighbours.
+        seed: Random seed for subsampling.
+        max_points: Maximum reference-set size.
+        max_pos_queries: Maximum positive query points.
+        metric: Distance metric for kNN.
+
+    Returns:
+        dict: ``k``, ``pos_knn_agree_mean``, ``pos_knn_agree_std``,
+              ``n_ref``, ``n_pos_queries``.
+    """
+    yb = (y > 0.5).astype(np.int32)
+    idx_pos = np.where(yb == 1)[0]
+    if idx_pos.size == 0 or X.shape[0] < k + 2:
+        return {"k": int(k), "pos_knn_agree_mean": float("nan"),
+                "pos_knn_agree_std": float("nan"), "n_ref": 0, "n_pos_queries": 0}
+
+    rng = np.random.default_rng(seed)
+    idx_all = np.arange(X.shape[0])
+    idx_ref = rng.choice(idx_all, size=min(max_points, idx_all.size), replace=False) if idx_all.size > max_points else idx_all
+    idx_q = rng.choice(idx_pos, size=min(max_pos_queries, idx_pos.size), replace=False) if idx_pos.size > max_pos_queries else idx_pos
+
+    X_ref, y_ref = X[idx_ref].astype(np.float32), yb[idx_ref]
+    X_q = X[idx_q].astype(np.float32)
+
+    nn = NearestNeighbors(n_neighbors=min(k + 1, X_ref.shape[0]), metric=metric)
+    nn.fit(X_ref)
+    neigh = nn.kneighbors(X_q, return_distance=False)
+    neigh_k = neigh[:, 1:min(k + 1, neigh.shape[1])]  # drop self-match
+
+    frac_pos = y_ref[neigh_k].mean(axis=1)
+    return {"k": int(k), "pos_knn_agree_mean": float(frac_pos.mean()),
+            "pos_knn_agree_std": float(frac_pos.std()),
+            "n_ref": int(X_ref.shape[0]), "n_pos_queries": int(X_q.shape[0])}
+
+
+# RESULT ANALYSIS FUNCTIONS #
+
+
+def cluster_transition_matrix(
+    cluster_sequence: np.array,
+    nclusts: int,
+    autocorrelation: bool = True,
+    return_graph: bool = False,
+) -> Tuple[Union[nx.Graph, Any], np.ndarray]:
+    """Compute the transition matrix between clusters and the autocorrelation in the sequence.
+
+    Args:
+        cluster_sequence (numpy.array): Sequence of cluster assignments.
+        nclusts (int): Number of clusters in the sequence.
+        autocorrelation (bool): Whether to compute the autocorrelation of the sequence.
+        return_graph (bool): Whether to return the transition matrix as an networkx.DiGraph object.
+
+    Returns:
+        trans_normed (numpy.ndarray / networkx.Graph): Transition matrix as numpy.ndarray or networkx.DiGraph.
+        autocorr (numpy.array): If autocorrelation is True, returns a numpy.ndarray with all autocorrelation values on cluster assignment.
+    """
+    # Stores all possible transitions between clusters
+    clusters = [str(i) for i in range(nclusts)]
+    cluster_sequence = cluster_sequence.astype(str)
+
+    trans = {t: 0 for t in product(clusters, clusters)}
+    k = len(clusters)
+
+    # Stores the cluster sequence as a string
+    transtr = "".join(list(cluster_sequence))
+
+    # Assigns to each transition the number of times it occurs in the sequence
+    for t in trans.keys():
+        trans[t] = len(re.findall("".join(t), transtr, overlapped=True))
+
+    # Normalizes the counts to add up to 1 for each departing cluster
+    trans_normed = np.zeros([k, k]) + 1e-5
+    for t in trans.keys():
+        trans_normed[int(t[0]), int(t[1])] = np.round(
+            trans[t]
+            / (sum({i: j for i, j in trans.items() if i[0] == t[0]}.values()) + 1e-5),
+            3,
+        )
+
+    # If specified, returns the transition matrix as an nx.Graph object
+    if return_graph:
+        trans_normed = nx.Graph(trans_normed)
+
+    if autocorrelation:
+        cluster_sequence = list(map(int, cluster_sequence))
+        autocorr = np.corrcoef(cluster_sequence[:-1], cluster_sequence[1:])
+        return trans_normed, autocorr
+
+    return trans_normed
+
+
+def get_total_Frames(video_paths: dict) -> int:
+    """Get the number of all frames in all videos listed in the input dictionary
+
+    Args:
+        video_paths (dict): Paths to all videos in a dicitonary
+
+    Returns:
+        total_frames (int): Total number of all video frames
+    """
+
+    total_frames = []
+    for _, video_path in video_paths.items():
+        current_video_cap = cv2.VideoCapture(video_path)
+        total_frames.append(int(current_video_cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+        current_video_cap.release()
+    return total_frames
+
+
+def validate_parameter(
+    param_name: str,
+    param_value: Any,
+    valid_options: List[Any],
+    is_list: bool = False,
+    custom_error_if_empty: Optional[str] = None,
+    only_one_of_many: Optional[bool] = True,
+    can_be_dict: Optional[bool] = False,
+): # pragma: no cover
+    """
+    A generic helper to validate a single parameter against a list of valid options.
+
+    Args:
+        param_name (str): The name of the parameter being checked (for error messages).
+        param_value (Any): The value of the parameter provided by the user.
+        valid_options (List[Any]): The list of allowed values.
+        is_list (bool): If True, checks if param_value is a subset of valid_options.
+                        Otherwise, checks if it is a member of valid_options.
+        custom_error_if_empty (Optional[str]): A specific error to raise if the
+                                               parameter is provided but the list
+                                               of valid options is empty.
+        only_one_of_many (Optional[bool]): If only one of the valid options is allowed: True
+                                           If a subset of the valid options is allowed: False
+        can_be_dict (Optional[bool]): Parameter can also be given as a dict (e.g. allowed for experiment_id)                                   
+    """
+    if param_value is None:
+        return  # Parameter not provided, no validation needed.
+
+    # If the param is provided but there are no valid options to check against
+    if not valid_options and custom_error_if_empty:
+        raise ValueError(custom_error_if_empty)  # pragma: no cover
+
+    valid_set = set(valid_options)
+    is_valid = False
+
+    if isinstance(param_value, dict) and can_be_dict:
+        value_set = set(
+            [x for lst in param_value.values() for x in lst]          
+        )
+        if value_set.issubset(valid_set):
+            is_valid = True
+    
+    elif not isinstance(param_value, dict) and is_list:
+        # Ensure param_value is a list-like object for set operations
+        value_set = set(
+            [param_value] if isinstance(param_value, str) else param_value
+        )
+        if value_set.issubset(valid_set):
+            is_valid = True
+    else:
+        if param_value in valid_set:
+            is_valid = True
+
+    if not is_valid:
+        # Truncate for readability
+        options_preview = str(valid_options[:5])[1:-1]
+        if len(valid_options) > 5:
+            options_preview += ", ..."
+
+        if only_one_of_many:    
+            raise ValueError(
+                f'Invalid value for "{param_name}". Must be one of: [{options_preview}]'
+            )  # pragma: no cover
+        else:
+            raise ValueError(
+                f'Invalid value for "{param_name}". Must be a subset of: [{options_preview}]'
+            )  # pragma: no cover
+

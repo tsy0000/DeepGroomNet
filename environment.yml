@@ -1,0 +1,17 @@
+# DeepGroomNet_v2 环境（新建，独立于原项目）
+# 创建：conda env create -p D:\DeepGroomNet_v2\env -f environment.yml
+# 或双击 setup_env.bat
+name: mouseaction_v2
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - cudatoolkit=11.8
+  - pytorch=2.1.0=py3.10_cuda11.8_cudnn8.9.2_0
+  - torchvision=0.16.0
+  - pip:
+      - -r requirements.txt
