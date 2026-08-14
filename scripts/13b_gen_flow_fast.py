@@ -1,16 +1,28 @@
+"""13b 光流批量生成 v2（加速版）：batch 前向 + 不压缩 + 多进程并行。
+
+优化（对比 v1）：
+  1. 每 clip 的 16 个采样窗合成 batch=16 一次前向（TinyMotionNet 很小，batch 无额外开销）
+  2. np.savez 不压缩（zlib 是隐藏瓶颈；float16 原生 64KB/clip，全量 ~3.3GB）
+  3. 多进程并行（默认 8 worker，各自加载模型，分片处理）
+预估：v1 5.5h → v2 约 20-40 分钟（取决于 CPU 解码瓶颈）。
+断点续跑：已生成的 npz 自动跳过。
+"""
 import os, sys, csv, time
-sys.path.insert(0, 'D:\\DeepGroomNet_v2\\third_party')
-sys.path.insert(0, 'D:\\DeepGroomNet_v2')
+sys.path.insert(0, r'D:\DeepGroomNet_v2\third_party')
+sys.path.insert(0, r'D:\DeepGroomNet_v2')
+
 import numpy as np
 import torch
-FLOW_ROOT = 'D:\\DeepGroomNet_v2\\outputs\\flow'
-CKPT = 'D:\\pretrained_models\\200221_115158_TinyMotionNet\\checkpoint.pt'
-CLIPS_CSV = 'D:\\DeepGroomNet_v2\\outputs\\clips\\clips.csv'
+
+FLOW_ROOT = r"D:\DeepGroomNet_v2\outputs\flow"
+CKPT = r"D:\pretrained_models\200221_115158_TinyMotionNet\checkpoint.pt"
+CLIPS_CSV = r"D:\DeepGroomNet_v2\outputs\clips\clips.csv"
 HEAT = 32
 WINDOW = 11
 OUT_IDX = 5
 NUM_FRAMES = 16
 NWORKERS = 8
+
 
 def sample_indices(total, n=NUM_FRAMES):
     if total <= 0:
@@ -18,6 +30,7 @@ def sample_indices(total, n=NUM_FRAMES):
     if total == 1:
         return [0]
     return list(np.unique(np.linspace(0, total - 1, num=n).round().astype(int)))
+
 
 def _window_arr(frames, idx, T):
     import cv2
@@ -28,19 +41,20 @@ def _window_arr(frames, idx, T):
     arr = np.stack([cv2.resize(f, (256, 256)) for f in win]).astype(np.float32) / 255.0
     return np.transpose(arr, (0, 3, 1, 2)).reshape(-1, 256, 256)
 
+
 def worker(rows):
     import cv2
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     from deepethogram.flow_generator.models.TinyMotionNet import TinyMotionNet
     m = TinyMotionNet(num_images=WINDOW)
-    ck = torch.load(CKPT, map_location='cpu', weights_only=False)
-    m.load_state_dict(ck['state_dict'])
+    ck = torch.load(CKPT, map_location="cpu", weights_only=False)
+    m.load_state_dict(ck["state_dict"])
     m = m.to(device).eval()
     done = 0
     t0 = time.time()
     for r in rows:
-        src = r['clip']
-        out = os.path.join(FLOW_ROOT, os.path.basename(src) + '.npz')
+        src = r["clip"]
+        out = os.path.join(FLOW_ROOT, os.path.basename(src) + ".npz")
         if os.path.exists(out):
             continue
         cap = cv2.VideoCapture(src)
@@ -53,34 +67,38 @@ def worker(rows):
         frames = [None] * T
         for fi in sorted(need):
             cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
-            (ok, fr) = cap.read()
+            ok, fr = cap.read()
             if ok:
                 frames[fi] = fr
         cap.release()
-        if any((f is None for f in frames[:T])):
+        if any(f is None for f in frames[:T]):
             continue
         xs = np.stack([_window_arr(frames, idx, T) for idx in idxs])
         with torch.no_grad():
             y = m(torch.from_numpy(xs).to(device))
         flows = y[0][:, OUT_IDX * 2:(OUT_IDX + 1) * 2]
-        flows = torch.nn.functional.interpolate(flows, size=(HEAT, HEAT), mode='bilinear', align_corners=False)
+        flows = torch.nn.functional.interpolate(
+            flows, size=(HEAT, HEAT), mode="bilinear", align_corners=False)
         np.savez(out, flow=flows.cpu().numpy().astype(np.float16))
         done += 1
         if done % 300 == 0:
-            print(f'  worker 进度 {done} clips | {(time.time() - t0) / done:.3f}s/clip', flush=True)
+            print(f"  worker 进度 {done} clips | {(time.time()-t0)/done:.3f}s/clip", flush=True)
     return done
+
 
 def main():
     import multiprocessing as mp
     os.makedirs(FLOW_ROOT, exist_ok=True)
-    rows = list(csv.DictReader(open(CLIPS_CSV, encoding='utf-8')))
+    rows = list(csv.DictReader(open(CLIPS_CSV, encoding="utf-8")))
     done = set(os.listdir(FLOW_ROOT))
-    todo = [r for r in rows if os.path.basename(r['clip']) + '.npz' not in done]
-    print(f'待生成 {len(todo)} / {len(rows)}，{NWORKERS} 进程并行', flush=True)
+    todo = [r for r in rows if os.path.basename(r["clip"]) + ".npz" not in done]
+    print(f"待生成 {len(todo)} / {len(rows)}，{NWORKERS} 进程并行", flush=True)
     t0 = time.time()
     chunks = [todo[i::NWORKERS] for i in range(NWORKERS)]
     with mp.Pool(NWORKERS) as pool:
         totals = pool.map(worker, chunks)
-    print(f'完成 {sum(totals)} | 总耗时 {(time.time() - t0) / 60:.1f} min', flush=True)
-if __name__ == '__main__':
+    print(f"完成 {sum(totals)} | 总耗时 {(time.time()-t0)/60:.1f} min", flush=True)
+
+
+if __name__ == "__main__":
     main()

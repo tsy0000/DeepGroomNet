@@ -1,4 +1,3 @@
-# 精简、可复现、无冗余（2025-08 按全项目 import 扫描收敛，移除未使用的 albumentations/av/tensorboard/timm/h5py/scipy）
 numpy>=1.24,<2.0
 opencv-python==4.8.1.78
 Pillow>=10.0
@@ -6,11 +5,10 @@ pandas>=2.0
 pyyaml>=6.0
 tqdm>=4.66
 scikit-learn>=1.3
-einops>=0.7            # TAdaConv 官方代码依赖（third_party 3 处 import）
-simplejson>=3.19       # TAdaConv 官方代码依赖（utils/logging.py）
+scipy>=1.10
+einops>=0.7
+simplejson>=3.19
 decord==0.6.0
 matplotlib>=3.8
-ultralytics>=8.3.0        # yolo11n.pt 需要 >=8.3（8.2.0 不支持 YOLO11 架构，报 C3k2 错误）
-streamlit>=1.30          # Web 应用（web_app.py）
-# 可选：MoSeq 音节边界（若推理端需要自己算音节）
-# keypoint-moseq @ git+https://github.com/dattalab/keypoint-moseq.git
+ultralytics>=8.3.0
+streamlit>=1.30

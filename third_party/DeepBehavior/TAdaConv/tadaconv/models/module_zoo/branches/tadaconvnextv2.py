@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# Copyright (C) Alibaba Group Holding Limited. 
 
 """ TAdaConvNeXtV2 block. """
 
@@ -55,10 +53,9 @@ class TAdaConvNeXtV2Block(nn.Module):
 
         x = self.dwconv(x, reshape_required=False, alpha=self.dwconv_rf(x))
 
-        # temporal aggregation
         norm_avgpool_x = self.avgpool(x)
-        x = x.permute(0, 2, 3, 4, 1) # (N, C, T, H, W) -> (N, T, H, W, C)
-        norm_avgpool_x = norm_avgpool_x.permute(0, 2, 3, 4, 1) # (N, C, T, H, W) -> (N, T, H, W, C)
+        x = x.permute(0, 2, 3, 4, 1)
+        norm_avgpool_x = norm_avgpool_x.permute(0, 2, 3, 4, 1)
         x = self.norm(x) + self.norm_avgpool(norm_avgpool_x)
 
         x = self.pwconv1(x)
@@ -66,7 +63,7 @@ class TAdaConvNeXtV2Block(nn.Module):
         x = self.pwconv2(x)
         if self.gamma is not None:
             x = self.gamma * x
-        x = x.permute(0, 4, 1, 2, 3) # (N, T, H, W, C) -> (N, C, T, H, W)
+        x = x.permute(0, 4, 1, 2, 3)
 
         x = input + self.drop_path(x)
         return x

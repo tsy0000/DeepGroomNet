@@ -1,219 +1,176 @@
-﻿# DeepGroomNet_v2 配置文件
-# 所有路径请按本机实际情况核对
+﻿
 
 DATA:
-  openfield_roots:            # 帧级 one-hot 标注的训练数据（不含光遗传纵向小鼠）
+  openfield_roots:
     - "E:/tsy/datasetssap3"
     - "E:/tsy/downloaddatasets"
-  opto_root: "E:/tsy/datasetsopto"      # 光遗传纵向小鼠（mouse4121/4122/4125...），仅应用分析，不进训练
-  homecage_root: "E:/tsy/clipped_database"           # 预裁剪8类行为片段（.mpg，4268个）
+  opto_root: "E:/tsy/datasetsopto"
+  homecage_root: "E:/tsy/clipped_database"
   clip_output_root: "D:/DeepGroomNet_v2/outputs/clips"
   meta_root: "D:/DeepGroomNet_v2/outputs/meta"
-  use_pre_extracted: true       # 优先使用 scripts/02 预裁剪的 clips.csv（含小鼠完整性校验）
+  use_pre_extracted: true
 
 CLIP:
-  num_input_frames: 16         # 模型输入帧数（与原训练/论文一致）
-  orig_segment_len: 45         # 原始1.5s片段帧数（30fps）
+  num_input_frames: 32
+  orig_segment_len: 45
   fps: 30
-  clip_interval: 15            # 生成时片段间隔（帧）
-  target_size: 224             # 输入空间尺寸
-  # —— 模块B(源头)：跨边界抖动采样（训练期增强，见 data/dataset.py；val/test 无随机）——
-  boundary_jitter: true        # 训练时 clip 窗口起点可越过标注/音节边界随机偏移 ±jitter 帧
-  jitter_frames: 4             # 最大偏移帧数（~133ms）
-  sliding_windows_per_uniform: 1  # 训练/推理一致化：每 uniform 窗口附 1 个随机滑窗（中心帧标签，可跨边界）
-  yolo_conf: 0.1               # YOLO 检测置信度（原 0.0 会引入大量垃圾框污染裁剪；无检测时回退中心方形）
+  clip_interval: 15
+  target_size: 224
+  boundary_jitter: true
+  jitter_frames: 4
+  sliding_windows_per_uniform: 1
+  yolo_conf: 0.1
   yolo_expand: 1.2
-  yolo_weights: "C:/Users/WIN10/PycharmProjects/mouseaction/DeepBehavior/runs/detect/train/weights/best.pt"  # 用户自训 YOLO11（train_yolo.py 训练产物）
-  # 归一化统计量：由 scripts/00_compute_stats.py 从全部 42 个视频实测生成
-  # （outputs/meta/video_dataset_stats.json，seed=42，每视频 60 帧）
+  yolo_weights: "C:/Users/WIN10/PycharmProjects/mouseaction/DeepBehavior/runs/detect/train/weights/best.pt"
+  aug_crop_scale: [0.75, 1.0]
+  aug_brightness: 0.2
+  aug_contrast: 0.2
+  aug_saturation: 0.2
+  aug_hue: 0.0
+  aug_erase_prob: 0.1
+  aug_rotate_deg: 15.0
   mean: [0.6220, 0.6219, 0.6165]
   std:  [0.2621, 0.2661, 0.2678]
-  motion_channel: true        # 帧差通道（回退用）：第 4 通道=帧间绝对差，stem 适配预训练 RGB 权重
-  motion_mean: 0.0085          # 帧差通道归一化统计（实测 8 视频×200帧：mean/std/p99=0.136）
+  motion_channel: true
+  motion_mean: 0.0085
   motion_std: 0.044
-  # —— 光流通道（DeepEthogram TinyMotionNet 官方权重，scripts/13_gen_flow.py 离线生成）——
-  flow_channel: true           # true=用真光流（第 5、6 通道 (dx,dy)）；对光照/新视频分布鲁棒
-  flow_root: "D:/DeepGroomNet_v2/outputs/flow"   # 光流 npz 目录（51186 clips 全量生成完毕）
+  flow_channel: true
+  flow_root: "D:/DeepGroomNet_v2/outputs/flow"
 
 KEYPOINTS:
-  # —— 关键点分支（Sturman et al. 2020, Neuropsychopharmacology：DLC 关键点 → MLP，
-  #    OFT 86±3% 达人类水平胜过商业系统；与本项目 RGB 流晚融合）——
-  root: "E:/tsy/keypointjson_to_csv"   # DLC superanimal_topviewmouse 输出（27 点，逐帧对齐）
-  enabled: true                # 缺关键点的小鼠（mouse01-19 等）自动全零屏蔽，不报错
-  use_parts: ~                 # 留空=全部 27 点；可只留 ["nose","left_ear","tail_base",...]
-  min_likelihood: 0.5          # DLC 置信度低于此值的关键点视为无效（坐标置0）
-  render_prior: true           # PoseC3D 伪热图（关键点+肢体，mmaction2 原版生成器）喂给注意力先验与热图流分支
-  render_sigma: 0.6            # 高斯 σ（PoseC3D 默认值，归一化坐标下）
-  render_heatmap_size: 64      # 热图分辨率（PoseC3D 同款；内存/精度折中）
+  root: "E:/tsy/keypointjson_to_csv"
+  enabled: true
+  use_parts: ~
+  min_likelihood: 0.5
+  render_prior: true
+  render_sigma: 0.6
+  render_heatmap_size: 32
 
 CLASSES:
   openfield: ["background", "Locomote", "Rear", "FaceGroom", "BodyGroom", "Defecate"]
   openfield_keep: ["Locomote", "Rear", "FaceGroom", "BodyGroom", "background"]
-  homecage: ["drink", "eat", "groom", "hang", "micromovement", "rear", "rest", "walk"]  # Jhuang 8类
+  homecage: ["drink", "eat", "groom", "hang", "micromovement", "rear", "rest", "walk"]
 
 MODEL:
   backbone: "TAdaConvNeXtV2_Tiny"
-  # 原项目预训练权重（不复制，直接引用）
   init_weights: "C:/Users/WIN10/PycharmProjects/mouseaction/DeepBehavior/TAdaConv/tadaconvnextv2_tiny_in1k_k400_79.6.pyth"
   num_classes: 5
-  # —— 模块A：注意力（默认 motion_stat：运动统计点位注意力，文献+实测双重验证）——
-  # none | motion | part | motion+part | motion_stat(推荐) | cbam | coordinate | pose_prompt
-  #   motion      —— 运动感知注意力（TEA CVPR'20 + BehaveAI PLOS Biol'26）
-  #   part        —— 部位分裂注意力（PCA 主轴前/后端；实测判别力弱 d≈0.5，保留作消融）
-  #   motion_stat —— 【推荐】运动统计点位注意力：时滞差分 m1/m2/m4（BehaveAI
-  #                  color-from-motion）+ 快速振荡图 r=m1/(m4+ε)（FG 前爪高频搓洗）+ 
-  #                  运动参与比 c=(Σe)²/(Σe²)（单点集中~小/扩散~大，方向由门学习）；
-  #                  实测判别信号 d=0.98/1.23
   attention: "motion_stat"
-  attention_reductions:        # 每类注意力独立 reduction（官方默认 CBAM=16, Coordinate=32, Motion=16）
+  attention_reductions:
     cbam: 16
     coordinate: 32
     motion: 16
     motion_stat: 16
-  attention_center_prior: 0.25 # 中心高斯先验 σ 系数（YOLO 裁剪后小鼠居中→聚焦小鼠抑制背景；0=关闭）
-  attention_mask_prior: 1.0    # 小鼠掩码先验强度（中值背景减除，零标注：1.0=背景像素门全抑制；0=关闭）
-  attention_kp_prior: 0.8      # 关键点聚焦先验（pose-guided attention）：DLC 关键点渲染的
-                               # 头/身体高斯热图乘进门——直接告诉注意力"头在哪/身在哪"，
-                               # 解决深层低分辨率空间统计失效的聚焦漂移；0=关闭
-  attention_positions: [0,1,2]    # 插在 backbone 哪些 stage 之后——2026-08-12 实测（diag on_mouse/off_mouse）：
-                                  # stage0/1 门强聚焦小鼠（diff +0.3~+0.5），stage2/3 在 s2 训练中
-                                  # 转为负聚焦（门偏向背景，diff -0.05~-0.26）→ 移除 stage3
-                                  # （当前运行=全 stage 版，作为 B 组对照）
+  attention_center_prior: 0.25
+  attention_mask_prior: 0.8
+  attention_kp_prior: 0.5
+  attention_positions: [0,1,2]
   dropout: 0.4
 
 LOSS:
-  # —— 分类头模式（2026-08-12 改为 DeepEthogram 式多标签为默认，稳健方案）——
-  # multilabel: 逐类 sigmoid + 逐类权重 + 验证集逐类阈值，背景=其余行为的逻辑非
-  #   （DeepEthogram eLife 2021 原文方案：不把背景当训练类，逐类调阈值——
-  #    正是为"background 占 56.7% 极端不均衡"设计；Sakamoto 2022 同思路但用下采样）
-  # softmax:    5 类互斥头（原方案，保留作 A/B 对照）
   head_mode: "multilabel"
-  binary_gamma: 1.0             # 二元 focal γ（Lin et al. ICCV 2017）；0=普通加权 BCE（更贴原文）
-  binary_alpha_mode: "deepethogram"   # 逐类权重 (neg/pos)^0.25（论文实测 β=0.25 最优）
-  binary_eval_threshold: 0.5    # eval_epoch 用阈值（最终指标仍以第 6 步逐类调优阈值+背景补集为准）
-  # —— 模块C：类别不平衡（DeepEthogram eLife'21 式：幂加权 + 稀有类偏置初始化）——
+  binary_gamma: 0.0
+  binary_label_smoothing: 0.05
+  binary_alpha_mode: "deepethogram"
+  binary_eval_threshold: 0.5
+  binary_exclusivity_pairs: [[2, 3]]
+  binary_exclusivity_weight: 0.05
+  l2sp:
+    enabled: true
+    alpha: 0.00001
+    beta: 0.001
   use_focal: true
   focal_gamma: 2.0
-  focal_alpha_balanced: true    # 用类别频率加权
-  # inverse(纯反频,稀有类~60x易过拟合) | sqrt(温和) | deepethogram((pos/neg)^β, β=0.25, 推荐)
+  focal_alpha_balanced: true
   focal_alpha_mode: "deepethogram"
-  focal_alpha_min: 0.05         # alpha 下界（防最大类被压死：sqrt 下 background 原 0.015 → 0.05，发表须报告）
-  rare_class_bias_init: true    # head 偏置 b=-log((1-π)/π)（RetinaNet/DeepEthogram 式，用类别先验起步）
+  focal_alpha_min: 0.05
+  rare_class_bias_init: true
   label_smoothing: 0.1
-  # —— 模块D-4：LLM 语义中介（EthoCLIP 式标签语义对齐）——
-  #   语义正则损失 L_sem = λ * MSE(cos_sim(类原型权重行) - S_LLM)
-  #   S_LLM 由 LLM 生成（provider 配置见 LLM 段；生成一次缓存到 outputs/meta/semantic_matrices.json）
-  #   provider=none 时自动回退内置专家 ethogram 先验矩阵（零外部依赖，流程不中断）
-  semantic_prior: false       # 默认关：EthoCLIP 是"预训练文本端"方法，本项目"头原型正则"是
-                              # 适配版（未经同任务文献证明）——只允许用 A/B 实验开启证明有效
-                              # （--no-semantic 反向覆盖，experiments/ab 见 README）
-  semantic_weight: 0.1        # λ（过大可能压制分类损失；FG/BG 相似度 0.55 是"相近但须判别"先验）
-  # —— EthoCLIP 本体增强（CVPR 2026，OSE 加权语义嵌入 + OAGM 层级感知图注意力）——
-  semantic_ose: true          # OSE：S = α·S_label + (1-α)·S_def（类型级+定义级双源，α 标签核心主导）
-  semantic_ose_alpha: 0.5     # α（EthoCLIP：α>β,γ，标签核心不弱化）
-  semantic_oagm: true         # OAGM：g_ij=σ(-λΔl_ij) 非对称层级门 + 2跳节点消息传递
-  semantic_oagm_lambda: 2.0   # λ（层级差灵敏度；EthoCLIP 2 跳最优）
-  semantic_oagm_hops: 2       # 消息传递跳数（2 最优，3 过度同质化）
-  semantic_oagm_tau: 0.5      # τ（原型更新尺度）
+  semantic_prior: false
+  semantic_weight: 0.1
+  semantic_ose: true
+  semantic_ose_alpha: 0.5
+  semantic_oagm: true
+  semantic_oagm_lambda: 2.0
+  semantic_oagm_hops: 2
+  semantic_oagm_tau: 0.5
 
 TRAIN:
-  epochs: 40                # 60→40：实测 s2 单 epoch ~90min（60 epoch ≈ 90h 不现实）；patience 早停兜底
-  batch_size: 2               # 硬件限制：显存/内存仅支持 batch=2
-  grad_accum: 4               # 梯度累积：有效 batch = batch_size × grad_accum = 8（稳定训练）
+  epochs: 40
+  batch_size: 2
+  grad_accum: 4
   lr: 0.0002
   weight_decay: 0.0005
-  grad_clip: 5.0               # 全局梯度裁剪（实测 s2 注意力梯度偶发 inf/nan——防御）
+  grad_clip: 5.0
+  grad_clip_headonly: 50.0
   warmup_epochs: 3
   lr_schedule: "cosine"
   early_stop_patience: 10
-  num_workers: 12             # 6→12：24 核 CPU，数据管线（解码/关键点热图/光流加载）并行
-  pin_memory: true
+  num_workers: 8
+  pin_memory: false
   persistent_workers: true
   seed: 42
-  mixed_precision: true
-  sampler_weighted: true       # 类别平衡采样（反频 WeightedRandomSampler）
-  # 多任务辅助训练（用户方案核心：homecage 8 类数据量弥补旷场 5 类数量少）
-  # 阶段3 联合训练：L = L_openfield(5类主头) + aux_weight * L_homecage(8类辅助头，共享backbone)
+  mixed_precision: false
+  sampler_weighted: true
+  sampler_quota: false
   aux_homecage: true
-  aux_weight: 0.3              # 辅助损失权重 λ（可调；消融：0 = 关闭）
+  aux_weight: 0.3
+  aux_every: 2
   split:
     val_ratio: 0.15
-    test_ratio: 0.15          # 按小鼠个体 hold-out 测试集
-  # 渐进式迁移学习（模块A/原方案均保留）：stage1 冻结backbone只训head
+    test_ratio: 0.15
   transfer_stages:
-    stage1_epochs: 6           # head-only 收敛慢是特征线性可分性弱所致（探针实测 3ep≈40%，lr 提升无效）
-    stage1_lr: 0.001
-  test_aug:                    # 推理端 TTA（模块C）
+    stage1_epochs: 6
+    stage1_lr: 0.01
+    homecage_epochs: 0
+  test_aug:
     hflip: true
     multi_crop: true
     crop_scales: [0.9, 1.0]
-  # —— 训练过程诊断（每 N epoch 输出：分组梯度范数 / 注意力门统计 / 类 logit + 热图 PNG）——
-  diagnostics: true            # 关闭则完全不跑（--no-diagnostics 等价）
-  diagnostics_every: 1         # 每 N epoch 输出一次
-  diagnostics_val_batches: 8   # 诊断用验证批数（约 128 clips，约 1-2 min）
+  diagnostics: true
+  diagnostics_every: 2
+  diagnostics_val_batches: 8
 
 POSTPROCESS:
-  # —— 模块B(推理端)：序列感知后处理 ——
-  smoothing: "sequence"        # none | vote | median | sequence
-  vote_window: 5               # 多数投票窗口（帧）
+  smoothing: "sequence"
+  vote_window: 5
   median_window: 7
-  seq_min_bout: 5              # 序列解码：短于该长度的孤立段合并到相邻状态
-  # Sakamoto et al. 2022 (Front. Behav. Neurosci. 16:797860) 三滤波器——
-  # FG/BG 判别力的直接文献来源：FG 敏感度 81.3%/PPR 83.5%，BG 91.9%/88.5%
-  sakamoto_filter: true        # 三滤波器总开关（孤立段/中断/切换）
-  sakamoto_min_isolated: 4     # (i) 短于该长度的梳理段=孤立误判 → 并入相邻
-  sakamoto_min_gap: 6          # (ii) 梳理 bout 内部短于该长度的缺口 → 填充
-  sakamoto_min_switch: 4       # (iii) 短于该长度的 FG↔BG 互切段 → 翻转为两侧
-  transition_prior: true       # 使用梳理句法转移先验 (FaceGroom->BodyGroom)
-  syllable_min_len: 1          # 音节多数投票：短于该长度的音节不强制投票（保留帧级预测）
-  # —— DeepEthogram 式阈值推断（eLife'21：不用 argmax，验证集逐类调阈值；空集=背景补集）——
-  threshold_tuning: true       # true=训练后自动在 val 上调阈值并报 test 阈值指标
-  threshold_candidates: 40     # 每类阈值网格数
-  threshold_passes: 2          # 坐标下降轮数
-  threshold_min_f1: 0.05       # F1 低于此的类复位阈值 0.5（防退化切到全 1）
+  seq_min_bout: 5
+  sakamoto_filter: true
+  sakamoto_min_isolated: 4
+  sakamoto_min_gap: 6
+  sakamoto_min_switch: 4
+  transition_prior: true
+  syllable_min_len: 1
+  threshold_tuning: true
+  threshold_candidates: 100
+  threshold_passes: 2
+  threshold_min_f1: 0.05
 
 INFER:
-  # 推理窗口模式：
-  #   sliding  —— 帧级滑窗（步进=clip_interval，与训练 uniform 同结构；每帧多窗平均，推荐）
-  #   syllable —— 按 MoSeq 音节边界整窗预测（legacy）
   window_mode: "sliding"
-  # ROI 裁剪（训练 clip 由 YOLO 裁剪生成，推理必须同策略，否则分布不一致）：
-  #   window —— 每窗检测首/中/末帧并集框（与 scripts/02_gen_clips.py 完全一致，推荐）
-  #   static —— 全视频检测一次静态框（更快，但框可能跟不上小鼠移动）
-  #   none   —— 整帧 resize（仅当推理视频已是裁剪好的）
   crop_mode: "window"
-  yolo_weights: "C:/Users/WIN10/PycharmProjects/mouseaction/DeepBehavior/runs/detect/train/weights/best.pt"  # 用户自训 YOLO11
-  # 音节边界文件（MoSeq/Keypoint-MoSeq 输出，frame级 state label）
-  syllable_csv_root: ""        # 例如 E:/tsy/downloaddatasets/mouse00/state_mouse00.csv
-  video_root: ""               # 推理视频目录
+  yolo_weights: "C:/Users/WIN10/PycharmProjects/mouseaction/DeepBehavior/runs/detect/train/weights/best.pt"
+  syllable_csv_root: ""
+  video_root: ""
 
 LLM:
-  # —— LLM 参与训练/验证（不含预测后处理：预测结果一经模型产出即确定）——
-  #   D-2 错误分析（scripts/05 --llm-error-analysis）：LLM 从混淆矩阵+错误样本提炼行为学错误模式
-  #   D-3 伪标签校验（scripts/08_llm_self_train.py）：LLM 语义校验高置信稀有类 bout → 并入训练集（source=pseudo，只进 train）
-  provider: "none"             # none | ollama（本地免费离线）| openai_compatible（免费额度 API）
-  # Ollama（完全免费、离线）：ollama pull qwen2.5:7b 后即可用
+  provider: "none"
   ollama_base_url: "http://localhost:11434"
   ollama_model: "qwen2.5:7b"
-  # OpenAI 兼容 API（有免费额度的端点）：
-  #   DeepSeek : base_url=https://api.deepseek.com/v1            model=deepseek-chat
-  #   智谱 GLM : base_url=https://open.bigmodel.cn/api/paas/v4   model=glm-4-flash（免费）
-  #   通义千问 : base_url=https://dashscope.aliyuncs.com/compatible-mode/v1  model=qwen-turbo
-  #   Moonshot : base_url=https://api.moonshot.cn/v1             model=moonshot-v1-8k
   api_base_url: ""
   api_model: "deepseek-chat"
   api_key: ""
   temperature: 0.3
   max_tokens: 1500
-  language: "zh"               # 报告语言 zh | en
+  language: "zh"
 
 SELFTRAIN:
-  # —— 模块D-3：LLM 伪标签 self-training（默认关闭；开启后与无伪标签训练互为消融）——
-  enabled: false               # true 时 train.py 自动并入 outputs/clips/clips_pseudo.csv（仅 train）
-  target_classes: ["FaceGroom", "BodyGroom"]  # 伪标签目标类（稀有类，提升 one-vs-rest ≥90%）
-  min_conf: 0.85               # 帧级置信度阈值（低于则丢弃）
-  min_len: 8                   # 最小时长（帧）
-  max_samples: 200             # 每次最多提交 LLM 校验的候选数（控制成本）
+  enabled: false
+  target_classes: ["FaceGroom", "BodyGroom"]
+  min_conf: 0.85
+  min_len: 8
+  max_samples: 200
 
 OUTPUT:
   checkpoint_dir: "D:/DeepGroomNet_v2/outputs/checkpoints"

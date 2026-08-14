@@ -7,3 +7,8 @@ __pycache__/
 *.log
 *.npz
 *.pt
+
+.idea/
+*.pth
+*.pyth
+.DS_Store

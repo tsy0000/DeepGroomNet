@@ -1,67 +1,55 @@
 # DeepGroomNet
 
-## Overview
+Frame-level behavioral classification of top-view single-mouse open-field videos: **Locomote · Rear · FaceGroom · BodyGroom · Background**.
 
-DeepGroomNet performs frame-wise behavioral classification on top-view mouse videos to recognize five categories of behaviors: Locomote, Rear, FaceGroom, BodyGroom and Background. Centered on a video action recognition backbone, the system integrates keypoint geometric priors and optical flow motion encoding, with a full pipeline for training, evaluation and inference.
+## Design
+
+| Layer | Approach | Provenance |
+|---|---|---|
+| Input | RGB + frame-difference + TinyMotionNet optical flow (6-ch, 32-frame clips) | DeepEthogram (eLife 2021) |
+| Backbone | TAdaConvNeXtV2 (K400-pretrained, fp32, T-dimension preserved) | TAdaConv (CVPR 2022) |
+| Geometry | DeepLabCut keypoints → PoseC3D-style heatmaps, late-fused with visual stream | PoseC3D (CVPR 2021) |
+| Attention | Motion-stat gating with center/mask/keypoint priors | BehaveAI (PLOS Biol 2026) |
+| Head | Multi-label sigmoid, class weights (neg/pos)^0.25, label smoothing, FG↔BG exclusivity | DeepEthogram |
+| Transfer | Progressive stages + multi-task homecage aux + **L2-SP** against pretrained weights | Li et al. (ICML 2018) |
+| Decoding | Per-class tuned thresholds + **data-driven per-class bout length** (1st percentile) + Sakamoto 3-stage filter | DeepEthogram / Sakamoto (2022) |
+
+## Pipeline
+
+```bash
+python scripts/01_build_metadata.py   # scan videos + one-hot labels
+python scripts/02_gen_clips.py        # YOLO-crop 45-frame clips
+python scripts/13_gen_flow.py         # precompute optical flow (TinyMotionNet)
+python train.py                       # progressive transfer + multi-task training
+python scripts/11_eval_test.py        # threshold tuning on val → report on held-out test
+python infer.py --video <video> --ckpt <best_model.pt>
+```
 
 ## Highlights
 
-- **Pretrained Video Backbone**：TAdaConvNeXtV2-based architecture trained via progressive transfer learning
-- **Motion Encoding**：Multi-modal input streams including raw RGB, frame difference and optical flow
-- **Keypoint Fusion**：DeepLabCut keypoints converted into heatmaps fed into a 3D CNN branch, late fused with the visual stream
-- **Multi-Label Classification Head**：Per-class Sigmoid activation, class-weighted loss function, and per-class threshold tuning on validation set
-- **Temporal Post-Processing**：Sequence-aware decoding and bout filtering based on valid behavior duration
-- **Interpretability Tools**：Gradient/attention diagnostics during training and attention heatmap visualization
+- **Mature-baseline parity, more signal**: 224px full-color + flow + keypoints + attention vs. 128px binary-difference input of the FG/BG reference (Sakamoto 2022)
+- **Numerically safe training**: fp32 throughout — AMP fp16 gradient overflow in TAdaConv routing/pose branches previously froze optimization (scaler backoff never fired)
+- **Rigorous data integrity**: clip labels require window-homogeneous one-hot; frame-aligned flow; NaN guard on inputs; mouse-level stratified splits
+- **Reproducible checkpoints**: per-epoch snapshots + last/best with optimizer & scaler state
 
 ## Requirements
 
-- Python 3.10, PyTorch ≥ 2.1, CUDA ≥ 11.8
-- OpenCV, Ultralytics, NumPy, Pandas, scikit-learn
-- Full dependencies listed in `requirements.txt` / `environment.yml`
+Python ≥ 3.10, PyTorch ≥ 2.1, CUDA ≥ 11.8, OpenCV, Ultralytics, NumPy, Pandas, scikit-learn, SciPy. See `requirements.txt`.
 
-## Quick Start
-
-```bash
-# 1. Generate metadata and pre-clipped video segments
-python scripts/01_build_metadata.py
-python scripts/02_gen_clips.py
-
-# 2. Dataset auditing and quality inspection
-python scripts/07_data_audit.py
-
-# 3. Precompute optical flow (optional, improves motion representation)
-python scripts/13_gen_flow.py
-
-# 4. Model training 
-python train.py
-
-# 5. Run inference on target video
-python infer.py --video <video.mp4> --ckpt <best_model.pt>
-```
-
-## Configuration
-
-All hyperparameters and settings are centralized in `configs/config.yaml`：
-
-- Dataset paths and clip sampling configurations
-- Backbone & attention module parameters, toggle switches for keypoint/optical flow branches
-- Loss function settings and training hyperparameters
-- Post-processing filtering rules
-
-## Project Layout
+## Layout
 
 ```
-configs/      Configuration files
-data/         Data loading & preprocessing (clip sampling, keypoint parsing, optical flow & heatmap generation)
-models/       Backbone network and submodules (attention layers, keypoint fusion branch)
-losses/       Custom loss functions
-postprocess/  Inference post-processing logic (thresholding, temporal smoothing, bout voting)
-llm/          Auxiliary analytical modules (optional, excluded from model training)
-scripts/      Helper scripts for data preparation, training evaluation and visualization
-train.py      Main training entry (progressive transfer learning + multi-task auxiliary loss + threshold optimization)
-infer.py      Main inference entry
+configs/       central configuration
+data/          clip sampling, keypoints, flow, augmentation
+models/        backbone, attention, pose branch
+losses/        weighted BCE, FG/BG exclusivity, L2-SP
+postprocess/   thresholding, bout filtering, sequence decode
+scripts/       data prep, training, evaluation, diagnostics
+train.py       training entry
+infer.py       inference entry
 ```
 
-## License
+## Notes
 
-See `LICENSE`.
+- Dataset paths in `configs/config.yaml` are local; adjust before use.
+- Top-view grooming datasets used for training follow the 6-column one-hot format (`background, Locomote, Rear, FaceGroom, BodyGroom, Defecate`).

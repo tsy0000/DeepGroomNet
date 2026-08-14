@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# Copyright (C) Alibaba Group Holding Limited. 
 
 """ TAdaConvV2. """
 
@@ -67,8 +65,7 @@ class RouteFuncwTransformer(nn.Module):
         self.zero_init_cal = zero_init_cal
         if zero_init_cal:
             self.b.skip_init=True
-            self.b.weight.data.zero_() # to make sure the initial values 
-                                    # for the output is 1.
+            self.b.weight.data.zero_()
         if with_bias_cal:
             self.b_bias = nn.Conv3d(
                 in_channels=int(c_in//ratio),
@@ -79,8 +76,7 @@ class RouteFuncwTransformer(nn.Module):
             )
             if zero_init_cal:
                 self.b_bias.skip_init=True
-                self.b_bias.weight.data.zero_() # to make sure the initial values 
-                                        # for the output is 1.
+                self.b_bias.weight.data.zero_()
             
     def forward(self, x):
         x = self.avgpool(x)
@@ -102,17 +98,15 @@ class RouteFuncwTransformer(nn.Module):
                 return self.b(x)
     
     def forward_attention(self, x):
-        b, c, t, _, _ = x.shape
-        qkv = self.qkv_proj(x)[:,:,:,0,0].view(b,3,self.head_dim,c//self.head_dim,t).permute(1,0,3,4,2)
-        q, k, v = qkv[0], qkv[1], qkv[2]
-
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        
-        x = (attn @ v).transpose(-2,-1).reshape(b, c, t)[:,:,:,None,None]
-
-        x = self.attn_out(x)
-        
+        with torch.cuda.amp.autocast(enabled=False):
+            x = x.float()
+            b, c, t, _, _ = x.shape
+            qkv = self.qkv_proj(x)[:, :, :, 0, 0].view(b, 3, self.head_dim, c // self.head_dim, t).permute(1, 0, 3, 4, 2)
+            q, k, v = qkv[0], qkv[1], qkv[2]
+            attn = (q @ k.transpose(-2, -1)) * self.scale
+            attn = attn.softmax(dim=-1)
+            x = (attn @ v).transpose(-2, -1).reshape(b, c, t)[:, :, :, None, None]
+            x = self.attn_out(x)
         return x
 
 class TAdaConv2dV2(nn.Module):
@@ -183,7 +177,6 @@ class TAdaConv2dV2(nn.Module):
 
             self.avgpool = nn.AvgPool3d(kernel_size=(3,1,1),stride=(1,1,1),padding=(1,0,0))
 
-        # base weights (W_b)
         self.weight = nn.Parameter(
             torch.Tensor(1, 1, out_channels, in_channels // groups, kernel_size[1], kernel_size[2])
         )
@@ -215,10 +208,8 @@ class TAdaConv2dV2(nn.Module):
         if reshape_required:
             assert self.num_frames is not None
             h = w = int(math.sqrt(feat.shape[0]))
-            # L, N, C -> H, W, B, T, C
             feat = feat.reshape(h,w,-1,self.num_frames,feat.shape[-1]).permute(2,4,3,0,1)
 
-        # generate calibration factors
         if alpha is None:
             alpha = self.rf_func(feat)
 
@@ -233,18 +224,13 @@ class TAdaConv2dV2(nn.Module):
         feat = feat.permute(0,2,1,3,4).reshape(1,-1,h,w)
 
         if self.cal_dim == "cin":
-            # w_alpha: B, C, T, H(1), W(1) -> B, T, C, H(1), W(1) -> B, T, 1, C, H(1), W(1)
-            # corresponding to calibrating the input channel
             weight = (w_alpha.permute(0,2,1,3,4).unsqueeze(2) * self.weight).reshape(-1, c_in//self.groups, kh, kw)
         elif self.cal_dim == "cout":
-            # w_alpha: B, C, T, H(1), W(1) -> B, T, C, H(1), W(1) -> B, T, C, 1, H(1), W(1)
-            # corresponding to calibrating the input channel
             weight = (w_alpha.permute(0,2,1,3,4).unsqueeze(3) * self.weight).reshape(-1, c_in//self.groups, kh, kw)
 
         bias = None
         if self.bias is not None:
             if b_alpha is not None:
-                # b_alpha: B, C, T, H(1), W(1) -> B, T, C, H(1), W(1) -> B, T, C
                 bias = (b_alpha.permute(0,2,1,3,4).squeeze() * self.bias).reshape(-1)
             else:
                 bias = self.bias.repeat(b, t, 1).reshape(-1)
