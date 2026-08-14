@@ -2,17 +2,6 @@
 
 Frame-level behavioral classification of top-view single-mouse open-field videos: **Locomote · Rear · FaceGroom · BodyGroom · Background**.
 
-## Design
-
-| Layer | Approach | Provenance |
-|---|---|---|
-| Input | RGB + frame-difference + TinyMotionNet optical flow (6-ch, 32-frame clips) | DeepEthogram (eLife 2021) |
-| Backbone | TAdaConvNeXtV2 (K400-pretrained, fp32, T-dimension preserved) | TAdaConv (CVPR 2022) |
-| Geometry | DeepLabCut keypoints → PoseC3D-style heatmaps, late-fused with visual stream | PoseC3D (CVPR 2021) |
-| Attention | Motion-stat gating with center/mask/keypoint priors | BehaveAI (PLOS Biol 2026) |
-| Head | Multi-label sigmoid, class weights (neg/pos)^0.25, label smoothing, FG↔BG exclusivity | DeepEthogram |
-| Transfer | Progressive stages + multi-task homecage aux + **L2-SP** against pretrained weights | Li et al. (ICML 2018) |
-| Decoding | Per-class tuned thresholds + **data-driven per-class bout length** (1st percentile) + Sakamoto 3-stage filter | DeepEthogram / Sakamoto (2022) |
 
 ## Pipeline
 
@@ -24,13 +13,6 @@ python train.py                       # progressive transfer + multi-task traini
 python scripts/11_eval_test.py        # threshold tuning on val → report on held-out test
 python infer.py --video <video> --ckpt <best_model.pt>
 ```
-
-## Highlights
-
-- **Mature-baseline parity, more signal**: 224px full-color + flow + keypoints + attention vs. 128px binary-difference input of the FG/BG reference (Sakamoto 2022)
-- **Numerically safe training**: fp32 throughout — AMP fp16 gradient overflow in TAdaConv routing/pose branches previously froze optimization (scaler backoff never fired)
-- **Rigorous data integrity**: clip labels require window-homogeneous one-hot; frame-aligned flow; NaN guard on inputs; mouse-level stratified splits
-- **Reproducible checkpoints**: per-epoch snapshots + last/best with optimizer & scaler state
 
 ## Requirements
 
