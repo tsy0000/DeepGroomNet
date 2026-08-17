@@ -23,6 +23,57 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class MlpBlock(nn.Module):
+    """PyTorch 移植自 Google MLP-Mixer (google-research/vision_transformer, Apache-2.0):
+       Dense(mlp_dim) -> GELU -> Dense(in_dim)。"""
+    def __init__(self, in_dim, mlp_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(in_dim, mlp_dim)
+        self.fc2 = nn.Linear(mlp_dim, in_dim)
+
+    def forward(self, x):
+        return self.fc2(F.gelu(self.fc1(x)))
+
+
+class MixerBlock(nn.Module):
+    """Mixer block (迁移自 Google MlpMixer, Apache-2.0): 残差 token-mixing + channel-mixing。
+
+    输入 x: [B, num_tokens, channels]
+      y = LN(x).transpose -> token_mixing MLP(对 token 维) -> 还原, x = x + y
+      y = LN(x); x = x + channel_mixing MLP(对 channel 维)
+    """
+    def __init__(self, channels, num_tokens, tokens_mlp_dim, channels_mlp_dim):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(channels)
+        self.norm2 = nn.LayerNorm(channels)
+        self.token_mixing = MlpBlock(num_tokens, tokens_mlp_dim)      # 对 token 维
+        self.channel_mixing = MlpBlock(channels, channels_mlp_dim)    # 对 channel 维
+
+    def forward(self, x):                                             # [B, T, C]
+        y = self.token_mixing(self.norm1(x).transpose(1, 2)).transpose(1, 2)
+        x = x + y
+        y = self.channel_mixing(self.norm2(x))
+        return x + y
+
+
+class _CHW2Tokens(nn.Module):
+    """[B,C,T,H,W] -> [B, T*H*W, C]"""
+    def forward(self, x):
+        B, C, T, H, W = x.shape
+        return x.permute(0, 2, 3, 4, 1).reshape(B, T * H * W, C)
+
+
+class _Tokens2CHW(nn.Module):
+    """[B, T*H*W, C] -> [B,C,T,H,W] (用 interpolate_size 还原)"""
+    def __init__(self, size):
+        super().__init__()
+        self.size = size
+    def forward(self, x):
+        B, L, C = x.shape
+        T, H, W = self.size
+        return x.reshape(B, T, H, W, C).permute(0, 4, 1, 2, 3)
+
+
 class CPAM(nn.Module):
     def __init__(self, stage_channels, out_ch, num_classes, interpolate_size=(16, 7, 7),
                  dropout=0.1):
@@ -33,9 +84,13 @@ class CPAM(nn.Module):
         self.proj = nn.ModuleList([
             nn.Conv3d(c, out_ch, kernel_size=1, bias=False) for c in stage_channels
         ])
-        # gi: mixer 层
+        # gi: mixer 层 (迁移自 Google MLP-Mixer MixerBlock; 论文CPAM引[21])
+        #  输入 [B,C,T,H,W] -> reshape [B, T*H*W, C] (tokens,channels) -> MixerBlock -> 还原
+        T, H, W = interpolate_size
+        num_tokens = T * H * W
+        mid = max(16, out_ch // 2)
         self.mixers = nn.ModuleList([
-            nn.Sequential(nn.Conv3d(out_ch, out_ch, kernel_size=1), nn.GELU())
+            nn.Sequential(_CHW2Tokens(), MixerBlock(out_ch, num_tokens, mid, mid), _Tokens2CHW(interpolate_size))
             for _ in stage_channels
         ])
         # 融合权重: GAP(X [N,4,C,T,H,W]) -> [N,4,C] -> MLP -> [N,4,C] -> softmax(沿4)
