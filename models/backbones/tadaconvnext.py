@@ -5,7 +5,7 @@ TAdaConvNeXtV2 封装（纯官方，无自定义附加模块）。
   - 4 个 stage 全部用官方 TAdaConvNeXtV2Block（third_party/DeepBehavior/TAdaConv/tadaconv）
   - 分类头 = 官方 BaseHead（AdaptiveAvgPool3d(1) -> Linear），见官方 base_blocks.py
 
-导入说明：官方代码内部以 `DeepBehavior.TAdaConv.tadaconv...` 包路径互相引用，
+导入说明：官方代码内部以 `tadaconv...` 包路径互相引用，
 因此本项目把官方源码放在 `third_party/DeepBehavior/TAdaConv/tadaconv`，
 并把 `third_party` 加入 sys.path，保持官方源码零改动。
 
@@ -26,9 +26,9 @@ if _THIRD_PARTY not in sys.path:
 import torch
 import torch.nn as nn
 
-from DeepBehavior.TAdaConv.tadaconv.models.module_zoo.ops.misc import LayerNorm
-from DeepBehavior.TAdaConv.tadaconv.models.module_zoo.branches.tadaconvnextv2 import TAdaConvNeXtV2Block
-from DeepBehavior.TAdaConv.tadaconv.models.utils.init_helper import trunc_normal_
+from tadaconv.models.module_zoo.ops.misc import LayerNorm
+from tadaconv.models.module_zoo.branches.tadaconvnextv2 import TAdaConvNeXtV2Block
+from tadaconv.models.utils.init_helper import trunc_normal_
 from models.cpam import CPAM
 
 

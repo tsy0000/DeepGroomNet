@@ -70,7 +70,9 @@ def macro_auroc(P, Y, class_names):
     scores = []
     for i in range(K):
         try:
-            scores.append(roc_auc_score(eye[:, i], P[:, i]))
+            s = roc_auc_score(eye[:, i], P[:, i])
+            if np.isfinite(s):
+                scores.append(s)
         except ValueError:
             continue
     return float(np.mean(scores)) if scores else 0.0
@@ -84,7 +86,9 @@ def macro_auprc(P, Y, class_names):
     scores = []
     for i in range(K):
         try:
-            scores.append(average_precision_score(eye[:, i], P[:, i]))
+            s = average_precision_score(eye[:, i], P[:, i])
+            if np.isfinite(s):
+                scores.append(s)
         except ValueError:
             continue
     return float(np.mean(scores)) if scores else 0.0
@@ -433,7 +437,7 @@ def main():
         best_ckpt = os.path.join(ckpt_dir, "lpft_best.pt")
         if os.path.exists(best_ckpt):
             ck = torch.load(best_ckpt, map_location=device, weights_only=False)
-            model.load_state_dict(ck["model_state"])
+            model.load_state_dict(ck["model_state"], strict=False)
             print(f"  载入 {best_ckpt} (epoch {ck.get('epoch','?')})")
         P, Y = evaluate(model, test_ld, cfg, device)
         if cfg["POSTPROCESS"].get("temporal_smooth", False):

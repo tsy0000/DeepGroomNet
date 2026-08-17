@@ -88,7 +88,7 @@ class CPAM(nn.Module):
         #  输入 [B,C,T,H,W] -> reshape [B, T*H*W, C] (tokens,channels) -> MixerBlock -> 还原
         T, H, W = interpolate_size
         num_tokens = T * H * W
-        mid = max(16, out_ch // 2)
+        mid = 128   # 辅助模块 mixer 用轻量 mlp_dim (成熟: 辅助分支应小, 避免 70M 过重)
         self.mixers = nn.ModuleList([
             nn.Sequential(_CHW2Tokens(), MixerBlock(out_ch, num_tokens, mid, mid), _Tokens2CHW(interpolate_size))
             for _ in stage_channels
