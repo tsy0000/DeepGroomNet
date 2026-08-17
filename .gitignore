@@ -1,0 +1,30 @@
+# ---- Large weights (exceed GitHub 100MB/file) ----
+weights/*.pyth
+weights/*.pth
+weights/*.pt
+data/*.mp4
+data/*.csv
+
+# ---- Run artifacts ----
+outputs/checkpoints/
+outputs/logs/
+outputs/metrics/
+outputs/search/
+outputs/predictions/
+outputs/clips/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# ---- IDE / OS ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---- Env ----
+.env
+env/
