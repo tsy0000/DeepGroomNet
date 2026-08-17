@@ -1,185 +1,591 @@
-"""DeepGroomNet Web App - upload a mouse open-field video, predict behaviors.
+# web_app.py — DeepGroomNet Mouse Behavior Prediction System
+# Complete replication of the original pred_openfield.py feature set,
+# adapted to the DeepGroomNet_v3 model (TAdaConvNeXtV2 + CPAM).
+# Run:  streamlit run web_app.py
 
-Run:  streamlit run web_app.py
-Loads the trained TAdaConvNeXtV2 + CPAM model, runs sliding-window frame-level
-inference with DeepEthogram post-processing, and renders a per-frame ethogram.
-"""
-import os, sys, tempfile, io, warnings
-warnings.filterwarnings("ignore")
+import streamlit as st
+import os
+import sys
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, PROJECT_ROOT)
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "third_party"))
 
 import cv2
-import numpy as np
 import torch
-import streamlit as st
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+import numpy as np
+import pandas as pd
+import logging
+import tempfile
+import warnings
+import io
+import json
+import h5py
+from datetime import datetime
+from collections import defaultdict
+from types import SimpleNamespace
+import torch.nn.functional as F
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "third_party"))
+warnings.filterwarnings('ignore')
 
 from models.backbones.tadaconvnext import TAdaConvNeXtV2
-from postprocess.thresholds import threshold_predict, compute_background, min_bout_per_behavior
 
-st.set_page_config(page_title="DeepGroomNet", page_icon="🐭", layout="wide", initial_sidebar_state="collapsed")
+os.environ['YOLO_SETTINGS_DIR'] = tempfile.gettempdir()
+from ultralytics import YOLO
 
-# ---------------------------------------------------------------- styling
-st.markdown("""
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
-  html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-  .block-container { padding-top: 2rem; max-width: 1100px; }
-  h1 { font-weight: 800; letter-spacing: -0.5px; }
-  .hero { font-size: 2.4rem; font-weight: 800; margin-bottom: 0.2rem; }
-  .sub { color: #6b7280; margin-bottom: 1.5rem; }
-  div[data-testid="stFileUploaderDropzone"] { border: 1.5px dashed #94a3b8; border-radius: 12px; }
-  div[data-testid="stFileUploaderDropzone"]:hover { border-color: #2563eb; }
-  .stButton>button { border-radius: 10px; padding: 0.5rem 1.2rem; font-weight: 600; }
-</style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="Mouse Behavior Prediction System", page_icon="🐭",
+                   layout="wide", initial_sidebar_state="expanded")
 
-CLASS_NAMES = ["Locomote", "Rear", "FaceGroom", "BodyGroom", "background"]
-BG_IDX = len(CLASS_NAMES) - 1
-COLORS = ["#2563eb", "#f59e0b", "#22c55e", "#ef4444", "#94a3b8"]
+# ============================================================ GLOBAL STYLING
+def apply_global_styling():
+    st.markdown("""
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+        html, body, [class*="css"] { font-family: 'Inter', Arial, sans-serif !important; }
+        p, span, label, button, input, select, .stMetricValue, .stMetricLabel,
+        .stMarkdownContainer p, .stMarkdownContainer span { font-size: 14px !important; }
+        h2, h3, h4, [data-testid="stTabs"] button p { font-size: 20px !important; font-weight: 700 !important; }
+        #super-title-container { text-align: center !important; margin: 30px 0 !important; }
+        #super-title { font-size: 52px !important; font-weight: 900 !important;
+                       color: #1f77b4 !important; line-height: 1.0 !important; }
+        div[data-testid="stFileUploaderDropzone"] { border: 1.5px dashed #94a3b8 !important;
+            border-radius: 12px !important; padding: 12px !important; }
+        div[data-testid="stFileUploaderDropzone"]:hover { border-color: #1f77b4 !important; background: #f8f9fa !important; }
+        .stButton>button { border-radius: 10px !important; padding: .5rem 1.2rem !important; font-weight: 600 !important; }
+        .block-container { padding-top: 1.5rem; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------------- model
+apply_global_styling()
+
+# ============================================================ CONSTANTS
+CLASS_NAMES = ['Locomote', 'Rear', 'FaceGroom', 'BodyGroom', 'background']
+BG_NAME = 'background'
+NUM_CLASSES = len(CLASS_NAMES)
+NUM_FRAMES = 16
+TARGET_SIZE = (224, 224)
+BOX_EXPANSION_RATIO = 1.5
+MEAN = [0.45, 0.45, 0.45]
+STD = [0.225, 0.225, 0.225]
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+AMP_ENABLE = torch.cuda.is_available()
+
+# ============================================================ LOGGING
 @st.cache_resource
-def load_model(cfg, ckpt_path):
-    mc = {"num_classes": len(CLASS_NAMES), "cpam": cfg["MODEL"].get("cpam", True),
-          "cpam_beta": 0.1, "cpam_alpha": 0.9, "dropout": 0.0}
-    from types import SimpleNamespace
-    model = TAdaConvNeXtV2(SimpleNamespace(**mc))
-    state = torch.load(ckpt_path, map_location="cpu", weights_only=False)["model_state"]
-    model.load_state_dict(state, strict=False)
-    model.eval()
-    return model
+def setup_logging():
+    logger = logging.getLogger("BehaviorPrediction")
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        console = logging.StreamHandler(); console.setLevel(logging.INFO)
+        console.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+        logger.addHandler(console)
+        log_dir = os.path.join(tempfile.gettempdir(), "behavior_prediction_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        fh = logging.FileHandler(os.path.join(log_dir, f"prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"), encoding='utf-8')
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+        logger.addHandler(fh)
+    return logger
 
+logger = setup_logging()
 
+# ============================================================ DLC KEYPOINTS
+def load_dlc_h5(h5_path):
+    try:
+        with h5py.File(h5_path, 'r') as f:
+            if 'df_with_categories' in f:
+                data = f['df_with_categories']['table'][:]
+                return pd.DataFrame(data)
+            keys = list(f.keys())
+            if keys:
+                return pd.DataFrame(f[keys[0]][:])
+        return None
+    except Exception as e:
+        st.error(f"Failed to load H5 file: {str(e)}")
+        return None
+
+def load_dlc_csv(csv_path):
+    try:
+        return pd.read_csv(csv_path, header=[0, 1, 2])
+    except Exception:
+        try:
+            return pd.read_csv(csv_path)
+        except Exception as e:
+            st.error(f"Failed to load CSV: {str(e)}")
+            return None
+
+def extract_keypoints_from_dlc(dlc_data, frame_idx):
+    try:
+        if dlc_data is None:
+            return None
+        if isinstance(dlc_data.columns, pd.MultiIndex):
+            keypoints = {}
+            for col in dlc_data.columns:
+                if col[2] in ['x', 'y']:
+                    bp = col[1]
+                    keypoints.setdefault(bp, {})[col[2]] = float(dlc_data.iloc[frame_idx][col])
+            return keypoints or None
+        else:
+            keypoints = {}
+            for col in dlc_data.columns:
+                if 'x' in str(col).lower() or 'y' in str(col).lower():
+                    keypoints[col] = float(dlc_data.iloc[frame_idx][col])
+            return keypoints or None
+    except Exception:
+        return None
+
+def draw_keypoints_on_frame(frame, keypoints, radius=3, thickness=-1):
+    if keypoints is None:
+        return frame
+    out = frame.copy()
+    h, w = frame.shape[:2]
+    colors = {'nose': (0, 255, 0), 'left_eye': (255, 0, 0), 'right_eye': (0, 0, 255),
+              'left_ear': (255, 255, 0), 'right_ear': (255, 0, 255), 'neck': (0, 255, 255),
+              'spine1': (128, 255, 0), 'spine2': (255, 128, 0), 'tail_base': (128, 0, 255),
+              'tail_mid': (255, 128, 128), 'tail_tip': (128, 128, 255)}
+    for bp, coords in keypoints.items():
+        if isinstance(coords, dict) and 'x' in coords and 'y' in coords:
+            x, y = int(coords['x']), int(coords['y'])
+            if 0 <= x < w and 0 <= y < h:
+                cv2.circle(out, (x, y), radius, colors.get(bp, (255, 255, 255)), thickness)
+    return out
+
+# ============================================================ MoSEQ
+def parse_moseq_csv(csv_data):
+    try:
+        df = pd.read_csv(csv_data, header=0) if isinstance(csv_data, str) else csv_data
+        syllable_series = df.iloc[:, 0].dropna().values.astype(int)
+        if len(syllable_series) == 0:
+            raise ValueError("MoSeq CSV has no valid frame data")
+        segments = []
+        current_syl, start = syllable_series[0], 0
+        for i in range(1, len(syllable_series)):
+            if syllable_series[i] != current_syl:
+                segments.append({"syllable": int(current_syl), "start": int(start),
+                                 "end": int(i - 1), "length": int(i - start)})
+                current_syl, start = syllable_series[i], i
+        segments.append({"syllable": int(current_syl), "start": int(start),
+                         "end": int(len(syllable_series) - 1), "length": int(len(syllable_series) - start)})
+        logger.info(f"MoSeq segments parsed: {len(segments)} segments, {len(syllable_series)} frames")
+        return segments, int(len(syllable_series))
+    except Exception as e:
+        logger.error(f"MoSeq parsing failed: {str(e)}", exc_info=True)
+        raise
+
+# ============================================================ VIDEO / CROP / TENSOR
+def read_video_frames(video_path, frame_idxs):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Failed to open video: {video_path}")
+    raw = []
+    for idx in frame_idxs:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ret, frame = cap.read()
+        if not ret:
+            frame = raw[-1] if raw else np.zeros((224, 224, 3), dtype=np.uint8)
+        raw.append(frame)
+    cap.release()
+    return raw
+
+def get_unified_crop_box(frames, yolo_model):
+    all_boxes = []
+    for frame in frames:
+        try:
+            res = yolo_model(frame, conf=0.5, verbose=False)
+            if res[0].boxes is not None and len(res[0].boxes) > 0:
+                all_boxes.append(res[0].boxes.xyxy[0].cpu().numpy())
+        except Exception:
+            pass
+    if not all_boxes:
+        h, w = frames[0].shape[:2]
+        return 0, 0, w, h
+    all_boxes = np.array(all_boxes)
+    min_x, min_y = all_boxes[:, 0].min(), all_boxes[:, 1].min()
+    max_x, max_y = all_boxes[:, 2].max(), all_boxes[:, 3].max()
+    cx, cy = (min_x + max_x) / 2, (min_y + max_y) / 2
+    side = max(max_x - min_x, max_y - min_y) * BOX_EXPANSION_RATIO
+    half = side / 2
+    x1, y1 = int(max(0, cx - half)), int(max(0, cy - half))
+    x2, y2 = int(min(frames[0].shape[1], cx + half)), int(min(frames[0].shape[0], cy + half))
+    w, h = x2 - x1, y2 - y1
+    if w > h:
+        d = w - h; y1 = max(0, y1 - d // 2); y2 = min(frames[0].shape[0], y2 + (d - d // 2))
+    else:
+        d = h - w; x1 = max(0, x1 - d // 2); x2 = min(frames[0].shape[1], x2 + (d - d // 2))
+    return int(x1), int(y1), int(x2), int(y2)
+
+def pad_frames_to_16(raw_frames):
+    pad = NUM_FRAMES - len(raw_frames)
+    if pad > 0:
+        raw_frames += [raw_frames[-1]] * pad
+    return raw_frames[:NUM_FRAMES]
+
+def split_segment_into_16f_chunks(seg):
+    start, end, out = seg["start"], seg["end"], []
+    for i in range(0, end - start + 1, NUM_FRAMES):
+        cs = start + i
+        out.append(list(range(cs, min(cs + NUM_FRAMES, end + 1))))
+    return out
+
+def process_16f_to_tensor(raw_frames, yolo_model):
+    raw_frames = pad_frames_to_16(raw_frames)
+    x1, y1, x2, y2 = get_unified_crop_box(raw_frames, yolo_model)
+    processed = []
+    for frame in raw_frames:
+        cropped = frame[y1:y2, x1:x2]
+        resized = cv2.resize(cropped, TARGET_SIZE, cv2.INTER_LINEAR)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        t = torch.from_numpy(rgb).permute(2, 0, 1).float() / 255.0
+        processed.append(t)
+    video = torch.stack(processed, dim=1).to(DEVICE)          # [C,T,H,W]
+    video = (video - torch.tensor(MEAN, device=DEVICE).view(3, 1, 1, 1)) / \
+            torch.tensor(STD, device=DEVICE).view(3, 1, 1, 1)
+    return video.unsqueeze(0)                                 # [1,C,T,H,W]
+
+def predict_single_chunk(model, input_tensor):
+    with torch.no_grad():
+        with torch.cuda.amp.autocast(enabled=AMP_ENABLE):
+            out = model(input_tensor)
+            if isinstance(out, tuple):
+                out = out[0]
+            prob = torch.sigmoid(out.float())
+            conf, cls_idx = torch.max(prob, dim=1)
+    return cls_idx.item(), conf.item()
+
+def load_csv_file(uploaded_file):
+    try:
+        return pd.read_csv(uploaded_file)
+    except Exception as e:
+        st.error(f"Failed to load CSV: {str(e)}")
+        return None
+
+# ============================================================ MODEL LOADING
 @st.cache_resource
-def load_config():
-    import yaml
-    return yaml.safe_load(open(os.path.join(ROOT, "configs", "config.yaml"), encoding="utf-8"))
+def load_models(tadaconv_weight_path, yolo_det_path):
+    try:
+        if not os.path.exists(tadaconv_weight_path):
+            st.error("TAdaConv weight file not found")
+            return None, None
+        with st.spinner("Loading TAdaConv model..."):
+            mc = SimpleNamespace(num_classes=NUM_CLASSES, cpam=True, cpam_beta=0.1,
+                                 cpam_alpha=0.9, dropout=0.0)
+            model = TAdaConvNeXtV2(mc).to(DEVICE)
+            ckpt = torch.load(tadaconv_weight_path, map_location=DEVICE, weights_only=False)
+            state = ckpt["model_state"] if "model_state" in ckpt else ckpt
+            model.load_state_dict(state, strict=False)
+            model.eval()
+        st.success("✓ TAdaConv loaded successfully")
+        logger.info("TAdaConv model loaded successfully")
+        if not os.path.exists(yolo_det_path):
+            st.error("YOLO weight file not found")
+            return model, None
+        with st.spinner("Loading YOLO model..."):
+            yolo_model = YOLO(yolo_det_path, verbose=False)
+        st.success("✓ YOLO loaded successfully")
+        logger.info("YOLO model loaded successfully")
+        return model, yolo_model
+    except Exception as e:
+        st.error(f"Model loading failed: {str(e)}")
+        logger.error(f"Model loading error: {str(e)}", exc_info=True)
+        return None, None
 
+# ============================================================ PREDICTION
+def predict_main(model, yolo_model, video_path, moseq_csv_path):
+    cap = cv2.VideoCapture(video_path)
+    video_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    moseq_segments, moseq_total_frames = parse_moseq_csv(moseq_csv_path)
+    if moseq_total_frames != video_total_frames:
+        logger.warning(f"MoSeq frames ({moseq_total_frames}) != Video frames ({video_total_frames})")
+    total_frames = min(video_total_frames, moseq_total_frames)
+    frame_results = [{"frame_idx": i, "pred": None, "conf": 0.0, "syllable": -1} for i in range(total_frames)]
+    progress_placeholder = st.empty()
+    status_placeholder = st.empty()
+    prediction_log = {"video_frames": video_total_frames, "moseq_frames": moseq_total_frames,
+                      "process_frames": total_frames, "segments": len(moseq_segments),
+                      "predictions": defaultdict(int)}
+    for seg_idx, seg in enumerate(moseq_segments):
+        s, e, syl = seg["start"], seg["end"], seg["syllable"]
+        if s >= total_frames:
+            break
+        for i in range(s, min(e + 1, total_frames)):
+            frame_results[i]["syllable"] = syl
+        if seg["length"] < 8:                                   # short segment -> background
+            pred_name = BG_NAME; conf = 1.0
+            for i in range(s, min(e + 1, total_frames)):
+                frame_results[i]["pred"] = pred_name; frame_results[i]["conf"] = conf
+                prediction_log["predictions"][pred_name] += 1
+            continue
+        chunks = split_segment_into_16f_chunks(seg)
+        status_placeholder.text(f"Processing segment [{s}-{e}] ({len(chunks)} chunks)")
+        for chunk_idx, frame_idxs in enumerate(chunks):
+            try:
+                raw_frames = read_video_frames(video_path, frame_idxs)
+                input_tensor = process_16f_to_tensor(raw_frames, yolo_model)
+                cls_idx, conf = predict_single_chunk(model, input_tensor)
+                pred_name = CLASS_NAMES[cls_idx]
+                for idx in frame_idxs:
+                    if idx < total_frames:
+                        frame_results[idx]["pred"] = pred_name
+                        frame_results[idx]["conf"] = conf
+                        prediction_log["predictions"][pred_name] += 1
+                progress = (seg_idx + chunk_idx / len(chunks)) / len(moseq_segments)
+                progress_placeholder.progress(min(progress, 1.0))
+            except Exception as e:
+                logger.error(f"Chunk prediction failed [{s}-{e}]: {str(e)}", exc_info=True)
+                for idx in frame_idxs:
+                    if idx < total_frames:
+                        frame_results[idx]["pred"] = BG_NAME
+                        frame_results[idx]["conf"] = 0.5
+                        prediction_log["predictions"][BG_NAME] += 1
+    unfilled = 0
+    for i in range(total_frames):
+        if frame_results[i]["pred"] is None:
+            frame_results[i]["pred"] = BG_NAME; frame_results[i]["conf"] = 1.0
+            unfilled += 1; prediction_log["predictions"][BG_NAME] += 1
+    status_placeholder.text("✓ Frame prediction completed")
+    logger.info("Prediction Statistics Report")
+    for k, v in prediction_log.items():
+        if k != "predictions":
+            logger.info(f"  {k}: {v}")
+    total_pred = sum(prediction_log["predictions"].values())
+    for behavior in CLASS_NAMES:
+        c = prediction_log["predictions"][behavior]
+        logger.info(f"  {behavior:<20}: {c:>6} frames ({(c/total_pred*100) if total_pred else 0:.2f}%)")
+    save_prediction_log(frame_results, prediction_log)
+    return frame_results
 
-# ---------------------------------------------------------------- inference
-@torch.no_grad()
-def sliding_window_probs(model, frames, device):
-    """frames: [N,3,H,W] float 0..1 -> per-frame prob [N,5]."""
-    num_frames = 16; stride = 1; size = 224
-    mean = 0.45; std = 0.225
-    xs = np.stack([cv2.resize(f, (size, size)) for f in frames]).astype(np.float32) / 255.0
-    xs = np.transpose(xs, (0, 3, 1, 2))                       # [N,3,H,W]
-    xs = (xs - mean) / std
-    N = xs.shape[0]
-    acc = np.zeros((N, 5), dtype=np.float64); cnt = np.zeros(N, dtype=np.int32)
-    for s in range(0, N - num_frames + 1, stride):
-        # xs[s:s+16] 是 [T,C,H,W], 转成模型需要的 [B,C,T,H,W]
-        x = torch.from_numpy(xs[s:s + num_frames]).permute(1, 0, 2, 3).unsqueeze(0).to(device)
-        out = model(x)
-        if isinstance(out, tuple): out = out[0]
-        p = torch.sigmoid(out.float()).cpu().numpy()[0]
-        acc[s:s + num_frames] += p; cnt[s:s + num_frames] += 1
-    cnt = np.maximum(cnt, 1)
-    return acc / cnt[:, None]
+def save_prediction_log(frame_results, prediction_log):
+    log_dir = os.path.join(tempfile.gettempdir(), "behavior_prediction_logs")
+    os.makedirs(log_dir, exist_ok=True)
+    detail = os.path.join(log_dir, f"prediction_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    pd.DataFrame(frame_results).to_csv(detail, index=False, encoding='utf-8')
+    summary = os.path.join(log_dir, f"prediction_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+    with open(summary, 'w', encoding='utf-8') as f:
+        f.write("=" * 70 + "\nBehavior Prediction Summary\n" + "=" * 70 + "\n")
+        for k, v in prediction_log.items():
+            if k != "predictions":
+                f.write(f"{k}: {v}\n")
+        f.write("-" * 70 + "\nBehavior Distribution:\n")
+        total_pred = sum(prediction_log["predictions"].values())
+        for b in CLASS_NAMES:
+            c = prediction_log["predictions"][b]
+            f.write(f"  {b:<20}: {c:>6} frames ({(c/total_pred*100) if total_pred else 0:.2f}%)\n")
+        f.write("=" * 70 + "\n")
+    logger.info(f"Logs saved: {detail} | {summary}")
 
+# ============================================================ UI
+def main():
+    st.markdown("""
+    <div id="super-title-container"><div id="super-title">🐭 Mouse Behavior Prediction System</div></div>
+    """, unsafe_allow_html=True)
 
-def postprocess(probs, class_names):
-    thresholds = {c: 0.5 for c in class_names}
-    pred = threshold_predict(probs, thresholds, class_names)
-    pred = compute_background(pred, bg_idx=BG_IDX)
-    pred = min_bout_per_behavior(pred, np.zeros(len(probs), dtype=int), class_names,
-                                 percentile=1, bg_idx=BG_IDX)
-    return pred
+    if 'temp_video_path' not in st.session_state: st.session_state.temp_video_path = None
+    if 'moseq_csv_path' not in st.session_state: st.session_state.moseq_csv_path = None
+    if 'frame_results' not in st.session_state: st.session_state.frame_results = []
+    if 'dlc_data' not in st.session_state: st.session_state.dlc_data = None
+    if 'moseq_df' not in st.session_state: st.session_state.moseq_df = None
+    if 'tadaconv_path' not in st.session_state:
+        st.session_state.tadaconv_path = os.path.join(PROJECT_ROOT, "outputs", "checkpoints", "lpft_best.pt")
+    if 'yolo_path' not in st.session_state:
+        st.session_state.yolo_path = r"C:\Users\WIN10\PycharmProjects\mouseaction\DeepBehavior\runs\detect\train\weights\best.pt"
 
+    with st.sidebar:
+        st.markdown("## ⚙️ Model Configuration")
+        st.session_state.tadaconv_path = st.text_input("TAdaConv Weight Path", value=st.session_state.tadaconv_path, key="tadaconv_input")
+        st.session_state.yolo_path = st.text_input("YOLO Weight Path", value=st.session_state.yolo_path, key="yolo_input")
+        st.markdown("---")
+        st.markdown("## 📊 Behavior Classes")
+        for c in CLASS_NAMES:
+            st.caption(f"• {c}")
+        st.markdown("---")
+        st.markdown("## 💾 System Information")
+        st.caption(f"**Compute Device**: {'GPU' if torch.cuda.is_available() else 'CPU'}")
+        st.caption(f"**PyTorch**: {torch.__version__}")
+        st.markdown("---")
+        st.markdown("## 📝 Log Files")
+        log_dir = os.path.join(tempfile.gettempdir(), "behavior_prediction_logs")
+        st.caption(f"**Location**: {log_dir}")
+        if os.path.exists(log_dir):
+            st.caption(f"**File Count**: {len(os.listdir(log_dir))}")
 
-def argmax_trace(pred):
-    # one-hot -> per-frame winning class (FG/BG exclusivity respected by postprocess)
-    return pred.argmax(1)
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📹 Video Manager", "📋 Data Preview", "🧠 Behavior Prediction", "✏️ Label Editor", "💾 Export Results"])
 
+    with tab1:
+        st.markdown("### 📹 Upload Video")
+        video_file = st.file_uploader(label="", type=["mp4", "avi", "mov"], key="video_upload", label_visibility="collapsed")
+        if video_file:
+            temp_video_path = os.path.join(tempfile.gettempdir(), video_file.name)
+            with open(temp_video_path, 'wb') as f:
+                f.write(video_file.getbuffer())
+            st.success("✓ Video uploaded successfully")
+            st.session_state.temp_video_path = temp_video_path
+            vc = cv2.VideoCapture(temp_video_path)
+            total_frames = int(vc.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = int(vc.get(cv2.CAP_PROP_FPS))
+            width = int(vc.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(vc.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            duration = total_frames / fps if fps > 0 else 0
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Frames", f"{total_frames}")
+            col2.metric("Duration", f"{duration:.2f}s")
+            col3.metric("Resolution", f"{width}×{height}")
+            st.session_state.total_frames = total_frames
+            st.session_state.fps = fps
+            st.markdown("#### Video Preview")
+            preview_frame_idx = st.slider("Select preview frame", 0, min(total_frames - 1, 299), 0, key="preview_slider")
+            vc.set(cv2.CAP_PROP_POS_FRAMES, preview_frame_idx)
+            ret, frame = vc.read()
+            if ret:
+                if st.session_state.dlc_data is not None:
+                    frame = draw_keypoints_on_frame(frame, extract_keypoints_from_dlc(st.session_state.dlc_data, preview_frame_idx))
+                st.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), caption=f"Frame {preview_frame_idx}", width=400)
+            vc.release()
+        st.markdown("---")
+        st.markdown("### 📋 Upload MoSeq State File")
+        moseq_file = st.file_uploader(label="", type=["csv"], key="moseq_upload", label_visibility="collapsed")
+        if moseq_file:
+            temp_csv_path = os.path.join(tempfile.gettempdir(), moseq_file.name)
+            with open(temp_csv_path, 'wb') as f:
+                f.write(moseq_file.getbuffer())
+            st.success("✓ MoSeq loaded successfully")
+            st.session_state.moseq_csv_path = temp_csv_path
+            moseq_df = load_csv_file(moseq_file)
+            if moseq_df is not None:
+                st.write("**Preview:**")
+                st.write(moseq_df.head(10))
+                st.session_state.moseq_df = moseq_df
+                st.info(f"MoSeq Total Frames: **{len(moseq_df)}**")
+        st.markdown("---")
+        st.markdown("### 📍 Upload DeepLabCut Keypoint File")
+        keypoint_file = st.file_uploader(label="", type=["h5", "csv"], key="keypoint_upload", label_visibility="collapsed")
+        if keypoint_file:
+            if keypoint_file.name.endswith('.h5'):
+                tmp = os.path.join(tempfile.gettempdir(), keypoint_file.name)
+                with open(tmp, 'wb') as f:
+                    f.write(keypoint_file.getbuffer())
+                dlc_data = load_dlc_h5(tmp)
+            else:
+                dlc_data = load_dlc_csv(keypoint_file)
+            if dlc_data is not None:
+                st.success("✓ Keypoint file loaded successfully")
+                st.write("**Preview:**")
+                st.write(dlc_data.head(10))
+                st.session_state.dlc_data = dlc_data
 
-# ---------------------------------------------------------------- display
-def render_ethogram(frames, pred, sample_every=8):
-    """Draw per-frame ethogram as horizontal color bands."""
-    N = len(frames)
-    K = len(CLASS_NAMES)
-    fig, ax = plt.subplots(figsize=(12, 1.2 + 0.12 * K))
-    for k in range(K):
-        y = K - 1 - k
-        for i in range(0, N, sample_every):
-            if pred[i, k]:
-                ax.add_patch(Rectangle((i, y), sample_every, 0.9, color=COLORS[k], ec="none"))
-    ax.set_yticks(range(K)); ax.set_yticklabels(reversed(CLASS_NAMES), fontsize=9)
-    ax.set_xlim(0, N); ax.set_ylim(-0.2, K)
-    ax.set_xlabel("frame"); ax.set_xticks([])
-    ax.set_title("Predicted Ethogram", fontsize=11, fontweight="bold")
-    for sp in ax.spines.values(): sp.set_visible(False)
-    plt.tight_layout()
-    return fig
+    with tab2:
+        st.markdown("### 📊 Data Preview")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button("📹 View Video Information", key="btn_video_info"):
+                if 'total_frames' in st.session_state:
+                    st.info(f"**Video Information**\n- Total Frames: {st.session_state.total_frames}\n- FPS: {st.session_state.fps}")
+                else:
+                    st.warning("Please upload video first")
+        with c2:
+            if st.button("📋 View MoSeq Data", key="btn_moseq"):
+                if st.session_state.moseq_df is not None:
+                    st.dataframe(st.session_state.moseq_df, use_container_width=True)
+                else:
+                    st.warning("Please upload MoSeq file first")
+        with c3:
+            if st.button("📍 View Keypoint Data", key="btn_keypoint"):
+                if st.session_state.dlc_data is not None:
+                    st.dataframe(st.session_state.dlc_data, use_container_width=True)
+                else:
+                    st.warning("Please upload keypoint file first")
 
+    with tab3:
+        st.markdown("### 🧠 Behavior Prediction")
+        st.info("Upload video + MoSeq, then click below")
+        if st.button("🚀 Start Prediction", key="predict_btn"):
+            if st.session_state.temp_video_path is None:
+                st.error("Please upload video file first")
+            elif st.session_state.moseq_csv_path is None:
+                st.error("Please upload MoSeq CSV file first")
+            else:
+                with st.spinner("Loading models..."):
+                    model, yolo_model = load_models(st.session_state.tadaconv_path, st.session_state.yolo_path)
+                if model is None or yolo_model is None:
+                    st.error("Model loading failed")
+                else:
+                    try:
+                        frame_level_results = predict_main(model, yolo_model, st.session_state.temp_video_path, st.session_state.moseq_csv_path)
+                        st.session_state.frame_results = frame_level_results
+                        st.success("✓ Behavior prediction completed!")
+                        st.markdown("#### Prediction Results Statistics")
+                        pred_df = pd.DataFrame(frame_level_results)
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Total Frames Predicted", len(frame_level_results))
+                        c2.metric("Average Confidence", f"{pred_df['conf'].mean():.4f}")
+                        c3.metric("Highest Confidence Behavior", pred_df.loc[pred_df['conf'].idxmax(), 'pred'])
+                        c4.metric("Lowest Confidence", f"{pred_df['conf'].min():.4f}")
+                        st.markdown("#### Behavior Distribution")
+                        st.bar_chart(pred_df['pred'].value_counts())
+                    except Exception as e:
+                        st.error(f"Prediction failed: {str(e)}")
+                        logger.error(f"Prediction error: {str(e)}", exc_info=True)
 
-def render_distribution(pred, counts):
-    fig, ax = plt.subplots(figsize=(7, 2.2))
-    bars = ax.bar(CLASS_NAMES, counts, color=COLORS, alpha=0.85)
-    for b, v in zip(bars, counts):
-        ax.text(b.get_x() + b.get_width()/2, v, f"{v*100:.0f}%", ha="center", va="bottom", fontsize=9)
-    ax.set_ylabel("% frames"); ax.set_title("Behavior Distribution", fontsize=11, fontweight="bold")
-    ax.spines[["top", "right"]].set_visible(False)
-    plt.tight_layout()
-    return fig
+    with tab4:
+        st.markdown("### ✏️ Frame Label Editor")
+        if len(st.session_state.frame_results) > 0:
+            df_results = pd.DataFrame(st.session_state.frame_results)
+            c1, c2, c3 = st.columns([1, 2, 2])
+            with c1:
+                frame_range = st.slider("Frame Range", 0, len(df_results) - 1, (0, min(50, len(df_results) - 1)), key="frame_range_slider")
+            with c2:
+                st.metric("Displayed Frames", frame_range[1] - frame_range[0] + 1)
+            with c3:
+                filter_class = st.selectbox("Filter", ["All"] + CLASS_NAMES, key="filter_select")
+            display_df = df_results[frame_range[0]:frame_range[1] + 1].copy()
+            if filter_class != "All":
+                display_df = display_df[display_df['pred'] == filter_class]
+            st.dataframe(display_df, use_container_width=True, height=400)
+            st.markdown("#### Edit Prediction Results")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                edit_frame_idx = st.number_input("Frame ID", 0, len(df_results) - 1, 0, key="edit_frame_num")
+            with c2:
+                cur = st.session_state.frame_results[edit_frame_idx]
+                st.info(f"Current: **{cur['pred']}**\nConfidence: **{cur['conf']:.4f}**")
+            with c3:
+                new_label = st.selectbox("New Label", CLASS_NAMES, key="edit_label_select")
+            with c4:
+                if st.button("💾 Update Prediction", key="btn_update"):
+                    old = st.session_state.frame_results[edit_frame_idx]['pred']
+                    st.session_state.frame_results[edit_frame_idx]['pred'] = new_label
+                    st.success(f"✓ Frame {edit_frame_idx} updated: {old} → {new_label}")
+        else:
+            st.info("Please execute prediction first")
 
+    with tab5:
+        st.markdown("### 💾 Export Results")
+        if len(st.session_state.frame_results) > 0:
+            export_df = pd.DataFrame(st.session_state.frame_results)
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.download_button("📥 CSV", export_df.to_csv(index=False), "behavior_predictions.csv", "text/csv")
+            with c2:
+                try:
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        export_df.to_excel(writer, sheet_name='Predictions', index=False)
+                    buffer.seek(0)
+                    st.download_button("📥 Excel", buffer, "behavior_predictions.xlsx",
+                                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                except Exception:
+                    st.warning("Excel export needs openpyxl")
+            with c3:
+                st.download_button("📥 JSON", export_df.to_json(orient='records', indent=2), "behavior_predictions.json", "application/json")
+            st.markdown("---")
+            st.markdown("#### 📊 Statistics")
+            s1, s2, s3 = st.columns(3)
+            s1.bar_chart(export_df['pred'].value_counts())
+            s2.metric("Average Confidence", f"{export_df['conf'].mean():.4f}")
+            s3.metric("Total Frames", len(export_df))
+        else:
+            st.info("Please execute prediction first")
 
-# ---------------------------------------------------------------- page
-cfg = load_config()
-st.markdown('<div class="hero">DeepGroomNet</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub">Frame-level mouse behavior recognition &middot; TAdaConvNeXtV2 + CPAM</div>',
-            unsafe_allow_html=True)
-
-ckpt_default = os.path.join(ROOT, "outputs", "checkpoints", "lpft_best.pt")
-ckpt = st.text_input("Model checkpoint", value=ckpt_default if os.path.exists(ckpt_default) else "")
-
-if not ckpt or not os.path.exists(ckpt):
-    st.info("Point to a trained checkpoint to enable prediction.")
-    st.stop()
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = load_model(cfg, ckpt)
-st.caption(f"Model loaded &middot; {device} &middot; {sum(p.numel() for p in model.parameters())/1e6:.1f}M params")
-
-uploaded = st.file_uploader("Upload an open-field mouse video (mp4)", type=["mp4", "avi", "mov"])
-if uploaded is None:
-    st.stop()
-
-tmp = os.path.join(tempfile.gettempdir(), "dgnet_" + uploaded.name)
-with open(tmp, "wb") as f:
-    f.write(uploaded.getbuffer())
-
-cap = cv2.VideoCapture(tmp)
-frames = []
-while True:
-    ok, fr = cap.read()
-    if not ok: break
-    frames.append(fr)
-cap.release()
-frames = np.stack(frames)
-st.success(f"Loaded {len(frames)} frames")
-
-with st.spinner("Predicting behaviors..."):
-    probs = sliding_window_probs(model, frames, device)
-    pred = postprocess(probs, CLASS_NAMES)
-    counts = pred.mean(0)
-    trace = argmax_trace(pred)
-
-col1, col2 = st.columns([3, 2])
-with col1:
-    st.pyplot(render_ethogram(frames, pred))
-with col2:
-    st.pyplot(render_distribution(pred, counts))
-    top = CLASS_NAMES[np.bincount(trace, minlength=len(CLASS_NAMES)).argmax()]
-    st.metric("Dominant behavior", top)
-
-buf = io.BytesIO()
-np.save(buf, pred)
-buf.seek(0)
-st.download_button("Download per-frame predictions (.npy)", data=buf, file_name="ethogram.npy")
+if __name__ == "__main__":
+    main()
