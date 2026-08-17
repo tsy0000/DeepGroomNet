@@ -58,6 +58,38 @@ def f1_macro_from(per_class, class_names):
     return float(np.mean([per_class[c]["f1"] for c in class_names]))
 
 
+def macro_auroc(P, Y, class_names):
+    """阈值无关的 AUROC (迁移自 DeepEthogram metrics.roc_auc / sklearn)。
+
+    用于早停/选模型, 避免在极小 val + 稀有类上做阈值网格搜索导致 F1 抖动。
+    P: [N,K] 概率; Y: [N] int 标签。
+    """
+    from sklearn.metrics import roc_auc_score
+    K = P.shape[1]
+    eye = (Y[:, None] == np.arange(K)).astype(int)
+    scores = []
+    for i in range(K):
+        try:
+            scores.append(roc_auc_score(eye[:, i], P[:, i]))
+        except ValueError:
+            continue
+    return float(np.mean(scores)) if scores else 0.0
+
+
+def macro_auprc(P, Y, class_names):
+    """阈值无关的 AUPRC (对极不平衡更稳)。"""
+    from sklearn.metrics import average_precision_score
+    K = P.shape[1]
+    eye = (Y[:, None] == np.arange(K)).astype(int)
+    scores = []
+    for i in range(K):
+        try:
+            scores.append(average_precision_score(eye[:, i], P[:, i]))
+        except ValueError:
+            continue
+    return float(np.mean(scores)) if scores else 0.0
+
+
 def build_model(cfg, num_classes):
     mc = type("MC", (), {
         "num_classes": num_classes,
@@ -232,11 +264,21 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, l2sp, class_names, device,
         eye = (Y[:, None] == np.arange(num_classes)).astype(int)
         per_class = binary_class_metrics(eye, pred, class_names)
         val_f1m = f1_macro_from(per_class, class_names)
+        # 阈值无关的早停/选模型指标 (DeepEthogram 用 AUROC; 避免阈值网格抖动)
+        # select_metric: auroc / auprc / f1
+        sel = cfg["TRAIN"].get("select_metric", "auroc")
+        if sel == "auprc":
+            sel_metric = macro_auprc(P, Y, class_names)
+        elif sel == "f1":
+            sel_metric = val_f1m
+        else:
+            sel_metric = macro_auroc(P, Y, class_names)
         save_metrics(metrics_csv, epoch, class_names, per_class, val_f1m, grad_epoch)
 
         # ---- 每 epoch 结束后逐类 acc/f1/recall/precision + 梯度汇总 ----
         print(f"\n[{tag}] ep{epoch+1}/{epochs} | TRAIN loss={tr_loss:.3f} acc={tr_acc*100:.1f} "
-              f"f1_macro={tr_f1s.mean()*100:.1f} | VAL f1_macro={val_f1m:.2f} | "
+              f"f1_macro={tr_f1s.mean()*100:.1f} | VAL f1_macro={val_f1m:.2f} "
+              f"AUROC={macro_auroc(P, Y, class_names):.3f} | "
               f"grad_L2={grad_epoch['grad_l2']:.1e} grad_max={grad_epoch['grad_max']:.1e} "
               f"grad_NaN={grad_epoch['grad_nan']}", flush=True)
         print(f"[{tag}] {'行为':<12}{'Acc':>7}{'F1':>7}{'Recall':>8}{'Precision':>10}", flush=True)
@@ -247,17 +289,17 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, l2sp, class_names, device,
 
         torch.save({"epoch": epoch, "stage": tag, "model_state": model.state_dict()},
                    os.path.join(ckpt_dir, f"{tag}_epoch_{epoch:03d}.pt"))
-        if val_f1m > best_f1:
-            best_f1, best_epoch, bad = val_f1m, epoch, 0
+        if sel_metric > best_f1:
+            best_f1, best_epoch, bad = sel_metric, epoch, 0
             torch.save({"epoch": epoch, "stage": tag, "model_state": model.state_dict(),
-                        "best_f1": best_f1},
+                        "best_metric": best_f1, "val_f1m": val_f1m},
                        os.path.join(ckpt_dir, f"{tag}_best.pt"))
         else:
             bad += 1
             if bad >= patience:
-                print(f"[{tag}] 早停 (best_f1={best_f1:.2f} ep{best_epoch+1})")
+                print(f"[{tag}] 早停 (best_{sel}={best_f1:.3f} ep{best_epoch+1})")
                 break
-    print(f"[{tag}] 完成, best val f1_macro={best_f1:.2f} ep{best_epoch+1}")
+    print(f"[{tag}] 完成, best {sel}={best_f1:.3f} ep{best_epoch+1}")
     return best_f1
 
 

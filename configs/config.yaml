@@ -78,6 +78,8 @@ TRAIN:
   warmup_epochs: 5
   lr_schedule: cosine
   early_stop_patience: 12
+  # 早停/选模型指标: auroc (阈值无关, 推荐, 迁移自 DeepEthogram/sklearn) / auprc / f1
+  select_metric: auroc
   mixed_precision: false      # fp32 (之前 fp16 溢出死锁教训)
   num_workers: 4
   clips_per_video: 60         # 每视频每 epoch 抽取 clip 数 (34视频×60=2040 sample/epoch)
