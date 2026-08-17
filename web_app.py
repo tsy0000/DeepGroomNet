@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 import logging
 import tempfile
+import subprocess
+import glob
 import warnings
 import io
 import json
@@ -260,6 +262,34 @@ def load_csv_file(uploaded_file):
         st.error(f"Failed to load CSV: {str(e)}")
         return None
 
+
+DLC_ENV_PY = r"D:\Anaconda3\envs\deeplabcut\python.exe"
+
+def detect_keypoints_superanimal(video_path, supermodel="superanimal_topviewmouse"):
+    """用 DLC SuperAnimal 检测视频关键点 (HRNet + FasterRCNN), 返回关键点 CSV 路径。
+
+    依赖 deeplabcut 环境 (DLC_ENV_PY)。通过子进程调用, 避免污染运行环境。
+    """
+    out_dir = os.path.join(tempfile.gettempdir(), "dlc_keypoints")
+    os.makedirs(out_dir, exist_ok=True)
+    script = (
+        "import deeplabcut, os, sys;"
+        "deeplabcut.video_inference_superanimal("
+        "[sys.argv[1]], sys.argv[2], model_name='hrnet_w32',"
+        "detector_name='fasterrcnn_resnet50_fpn_v2', videotype='.mp4',"
+        "video_adapt=True, scale_list=[], pcutoff=0.5)"
+    )
+    result = subprocess.run([DLC_ENV_PY, "-c", script, video_path, supermodel],
+                            capture_output=True, text=True, timeout=1800)
+    if result.returncode != 0:
+        st.error(f"Keypoint detection failed: {result.stderr[-800:]}")
+        return None
+    # 找输出的关键点 csv
+    base = os.path.splitext(os.path.basename(video_path))[0]
+    cands = glob.glob(os.path.join(os.path.dirname(video_path), "**", f"{base}*.csv"), recursive=True)
+    cands += glob.glob(os.path.join(out_dir, "**", f"{base}*.csv"), recursive=True)
+    return cands[0] if cands else None
+
 # ============================================================ MODEL LOADING
 @st.cache_resource
 def load_models(tadaconv_weight_path, yolo_det_path):
@@ -345,6 +375,8 @@ def predict_main(model, yolo_model, video_path, moseq_csv_path):
             frame_results[i]["pred"] = BG_NAME; frame_results[i]["conf"] = 1.0
             unfilled += 1; prediction_log["predictions"][BG_NAME] += 1
     status_placeholder.text("✓ Frame prediction completed")
+    # 音节分界后处理: 段内取主导行为, 只在音节边界处变 -> 保留动作自然边界
+    frame_results = apply_syllable_smoothing(frame_results, moseq_segments)
     logger.info("Prediction Statistics Report")
     for k, v in prediction_log.items():
         if k != "predictions":
@@ -374,6 +406,38 @@ def save_prediction_log(frame_results, prediction_log):
             f.write(f"  {b:<20}: {c:>6} frames ({(c/total_pred*100) if total_pred else 0:.2f}%)\n")
         f.write("=" * 70 + "\n")
     logger.info(f"Logs saved: {detail} | {summary}")
+
+
+def syllable_boundaries(syllable):
+    """Keypoint-MoSeq 逐帧音节 [N] -> 切换边界 [N] 0/1 (1=允许行为切换)。"""
+    syl = np.asarray(syllable)
+    bd = np.zeros(len(syl), dtype=np.int32)
+    bd[1:] = (np.diff(syl) != 0).astype(np.int32)
+    bd[0] = 1
+    return bd
+
+
+def apply_syllable_smoothing(frame_results, moseq_segments):
+    """音节分界后处理: 每个 MoSeq 音节段内, 用段内主导行为替换逐帧预测。
+
+    理由: Keypoint-MoSeq 音节是"无监督运动模块", 段内应保持同一动作。
+    只在音节切换(边界)处允许行为变化 -> 保留动作自然边界、消除段内抖动。
+    返回新的 frame_results。
+    """
+    import collections
+    out = [dict(r) for r in frame_results]
+    for seg in moseq_segments:
+        s, e = seg["start"], min(seg["end"], len(out) - 1)
+        if s > e:
+            continue
+        counts = collections.Counter(out[i]["pred"] for i in range(s, e + 1))
+        if not counts:
+            continue
+        majority = counts.most_common(1)[0][0]
+        for i in range(s, e + 1):
+            out[i]["pred"] = majority
+            out[i]["conf"] = max(out[i]["conf"], 0.0)
+    return out
 
 # ============================================================ UI
 def main():
@@ -458,7 +522,7 @@ def main():
                 st.session_state.moseq_df = moseq_df
                 st.info(f"MoSeq Total Frames: **{len(moseq_df)}**")
         st.markdown("---")
-        st.markdown("### 📍 Upload DeepLabCut Keypoint File")
+        st.markdown("### 📍 DeepLabCut Keypoint File")
         keypoint_file = st.file_uploader(label="", type=["h5", "csv"], key="keypoint_upload", label_visibility="collapsed")
         if keypoint_file:
             if keypoint_file.name.endswith('.h5'):
@@ -473,6 +537,22 @@ def main():
                 st.write("**Preview:**")
                 st.write(dlc_data.head(10))
                 st.session_state.dlc_data = dlc_data
+        st.markdown("#### 🧬 Detect Keypoints (DLC SuperAnimal)")
+        if st.session_state.temp_video_path:
+            if st.button("🔍 Run Keypoint Detection", key="btn_kp_detect"):
+                if not os.path.exists(DLC_ENV_PY):
+                    st.error("deeplabcut env not found. Install at " + DLC_ENV_PY)
+                else:
+                    with st.spinner("Running DLC SuperAnimal keypoint detection (may take minutes)..."):
+                        csv_path = detect_keypoints_superanimal(st.session_state.temp_video_path)
+                    if csv_path:
+                        dlc_data = load_dlc_csv(csv_path)
+                        if dlc_data is not None:
+                            st.session_state.dlc_data = dlc_data
+                            st.success(f"✓ Keypoints detected: {os.path.basename(csv_path)}")
+                            st.write(dlc_data.head(10))
+        else:
+            st.caption("Upload a video first to enable keypoint detection")
 
     with tab2:
         st.markdown("### 📊 Data Preview")
