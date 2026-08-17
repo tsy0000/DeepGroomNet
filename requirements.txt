@@ -1,0 +1,35 @@
+# DeepGroomNet — runtime requirements
+# Core ML
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+numpy
+pandas
+opencv-python
+PyYAML
+scipy
+einops
+simplejson
+yacs
+
+# Video backbone (TAdaConv) deps
+# (sourced from third_party/)
+
+# Detection & preprocessing
+ultralytics
+
+# Keypoint detection (optional; separate env recommended)
+# deeplabcut>=2.3
+
+# Unsupervised syllables (optional; separate env recommended)
+# keypoint_moseq
+
+# Postprocessing / data
+h5py
+
+# Web app
+streamlit
+matplotlib
+openpyxl
+
+# Hyperparameter search (optional)
+optuna

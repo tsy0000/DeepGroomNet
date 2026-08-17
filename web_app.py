@@ -264,6 +264,56 @@ def load_csv_file(uploaded_file):
 
 
 DLC_ENV_PY = r"D:\Anaconda3\envs\deeplabcut\python.exe"
+MOSSEQ_ENV_PY = r"D:\Anaconda3\envs\keypoint_moseq\python.exe"
+
+
+def run_moseq_fit(keypoint_dir, kappa=1e5):
+    """现场运行 Keypoint-MoSeq 拟合 (镜像 notebook: PCA -> AR-HMM -> 提取音节)。
+
+    通过子进程调用 keypoint_moseq 环境。返回 {video_name: syllable_array}。
+    """
+    out_dir = os.path.join(tempfile.gettempdir(), "moseq_fit_out")
+    os.makedirs(out_dir, exist_ok=True)
+    script = os.path.join(PROJECT_ROOT, "scripts", "moseq_fit_inference.py")
+    result = subprocess.run([MOSSEQ_ENV_PY, script, keypoint_dir, out_dir, str(kappa)],
+                            capture_output=True, text=True, timeout=3600)
+    if result.returncode != 0:
+        st.error(f"Keypoint-MoSeq fit failed: {result.stderr[-800:]}")
+        logger.error(f"moseq fit error: {result.stderr[-800:]}")
+        return {}
+    syllables = {}
+    for npy in glob.glob(os.path.join(out_dir, "*.syllable.npy")):
+        name = os.path.basename(npy).replace(".syllable.npy", "")
+        syllables[name] = np.load(npy)
+    return syllables
+
+
+def apply_syllable_boundaries_to_results(frame_results, syllables, video_basename):
+    """用 Keypoint-MoSeq 音节边界对逐帧行为做音节分界 (只在音节切换处允许行为变化)。
+
+    对每个音节段取段内主导行为; 若某帧当前预测与段内主导不同, 保留主导(自然边界)。
+    """
+    import collections
+    key = None
+    for k in syllables:
+        if k.startswith(video_basename):
+            key = k; break
+    if key is None:
+        return frame_results
+    syl = syllables[key]
+    n = min(len(syl), len(frame_results))
+    out = [dict(r) for r in frame_results]
+    i = 0
+    while i < n:
+        j = i
+        while j < n and syl[j] == syl[i]:
+            j += 1
+        counts = collections.Counter(out[k]["pred"] for k in range(i, j))
+        majority = counts.most_common(1)[0][0] if counts else out[i]["pred"]
+        for k in range(i, j):
+            out[k]["pred"] = majority
+        i = j
+    return out
 
 def detect_keypoints_superanimal(video_path, supermodel="superanimal_topviewmouse"):
     """用 DLC SuperAnimal 检测视频关键点 (HRNet + FasterRCNN), 返回关键点 CSV 路径。
@@ -594,6 +644,21 @@ def main():
                         frame_level_results = predict_main(model, yolo_model, st.session_state.temp_video_path, st.session_state.moseq_csv_path)
                         st.session_state.frame_results = frame_level_results
                         st.success("✓ Behavior prediction completed!")
+                        # 音节分界: 现场跑 Keypoint-MoSeq 拟合 -> 音节边界 -> 段内主导行为
+                        st.markdown("#### 🧬 Keypoint-MoSeq Syllable Boundary")
+                        if st.session_state.dlc_data is not None and os.path.exists(MOSSEQ_ENV_PY):
+                            with st.spinner("Running Keypoint-MoSeq fit (PCA + AR-HMM)... may take minutes"):
+                                kp_dir = os.path.join(tempfile.gettempdir(), "dlc_keypoints")
+                                syllables = run_moseq_fit(kp_dir)
+                            if syllables:
+                                base = os.path.splitext(os.path.basename(st.session_state.temp_video_path))[0]
+                                st.session_state.frame_results = apply_syllable_boundaries_to_results(
+                                    st.session_state.frame_results, syllables, base)
+                                st.success("✓ Syllable-boundary smoothing applied (preserves natural bout edges)")
+                            else:
+                                st.warning("No syllables produced; skipped boundary smoothing")
+                        else:
+                            st.caption("Upload keypoints + keypoint_moseq env to enable syllable-boundary smoothing")
                         st.markdown("#### Prediction Results Statistics")
                         pred_df = pd.DataFrame(frame_level_results)
                         c1, c2, c3, c4 = st.columns(4)
