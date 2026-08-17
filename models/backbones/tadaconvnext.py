@@ -2,11 +2,11 @@
 TAdaConvNeXtV2 封装（纯官方，无自定义附加模块）。
 
 结构忠实迁移自官方 alibaba-mmai-research/TAdaConv（Apache-2.0）的 TAdaConvNeXtV2：
-  - 4 个 stage 全部用官方 TAdaConvNeXtV2Block（third_party/DeepBehavior/TAdaConv/tadaconv）
+  - 4 个 stage 全部用官方 TAdaConvNeXtV2Block（third_party/tadaconv）
   - 分类头 = 官方 BaseHead（AdaptiveAvgPool3d(1) -> Linear），见官方 base_blocks.py
 
 导入说明：官方代码内部以 `tadaconv...` 包路径互相引用，
-因此本项目把官方源码放在 `third_party/DeepBehavior/TAdaConv/tadaconv`，
+因此本项目把官方源码放在 `third_party/tadaconv`，
 并把 `third_party` 加入 sys.path，保持官方源码零改动。
 
 保留（成熟的训练技巧）：
