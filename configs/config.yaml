@@ -1,0 +1,127 @@
+# ============================================================
+# DeepGroomNet_v3 配置
+# 架构决策（基于成熟项目调研：DeepEthogram + Sakamoto + TAdaConv）：
+#   - Backbone: TAdaConvNeXtV2-Tiny (K400 官方权重, 时域自适应适合理毛微动作)
+#   - 输入: RGB[3] + 帧差[1] = 4 通道 × 16 帧 (Sakamoto 差分思想, 零训练成本)
+#   - Head: 多标签 sigmoid 5 类 (background=其余行为逻辑非, DeepEthogram)
+#   - 损失: 加权 BCE + label smoothing 0.05 + FG/BG 互斥 + 分层 lr
+#   - 增强: DeepEthogram 官方 (轻量, 不用 Mixup/RandAugment 强增强破坏微动作)
+#   - 后处理: 阈值调优 + min_bout + Sakamoto 三规则 + MoSeq 音节
+# ============================================================
+
+DATA:
+  # 官方 DeepEthogram 集 (20 只) + 自采 (34 只), 逐帧 one-hot 标签
+  openfield_roots:
+    - "E:/tsy/downloaddatasets"
+    - "E:/tsy/datasetssap3"
+  clip_output_root: "D:/DeepGroomNet_v3/outputs/clips"
+  meta_root: "D:/DeepGroomNet_v3/outputs/meta"
+
+CLASSES:
+  # 5 类目标 (旷场), background=非行为(Micromovement)
+  openfield: ["Locomote", "Rear", "FaceGroom", "BodyGroom", "background"]
+  # FG/BG 互斥对 (Kalueff 梳理句法: 两种理毛不共存)
+  exclusive_pairs: [[2, 3]]
+
+CLIP:
+  num_input_frames: 16        # 16 帧 (0.53s), 成熟做法: 足够捕捉理毛 bout 起始
+  target_size: 224
+  # 预训练对齐: 官方 TAdaConv finetune.yaml MEAN=0.45 STD=0.225 (输入已 /255)
+  norm_mean: 0.45
+  norm_std: 0.225
+  # YOLO 裁剪预处理 (参照 Swin-Panda): true 时用 outputs/meta/yolo_boxes.json 裁到小鼠
+  yolo_crop: true
+  # 运动建模由 3D 骨干在内部完成(TAdaConv 时域自适应卷积), 无需帧差/光流输入
+  jitter_frames: 4
+  aug_crop_scale: [0.5, 1.0]  # 官方 TAdaConv K400 值 (下限适配小鼠小目标)
+  # DeepEthogram 官方增强参数 (轻量, 保护微动作)
+  aug_brightness: 0.25
+  aug_contrast: 0.1
+  aug_saturation: 0.1
+  aug_hue: 0.1
+  aug_hflip_prob: 0.5
+  aug_rotation_deg: 10        # 旋转 ±10° (旷场小鼠各方向; UD 翻转=0 尊重物理)
+  aug_color_p: 0.5
+  aug_grayscale_p: 0.0        # 理毛需颜色区分 (舌 vs 毛), 不用灰度
+
+MODEL:
+  backbone: "tadaconvnextv2_tiny"
+  pretrained: "D:/DeepGroomNet_v3/weights/tadaconvnextv2_tiny_in1k_k400_79.6.pyth"
+  # 纯官方 TAdaConvNeXtV2 主干 + 官方 BaseHead 分类头
+  # 局部细粒度模块: CPAM (Swin-Panda 多stage融合+辅助损失, 严格按原文)
+  cpam: true
+  cpam_alpha: 0.9
+  cpam_beta: 0.1
+
+LOSS:
+  head_mode: multilabel       # 多标签 sigmoid (DeepEthogram)
+  # 类别不平衡(极不平衡: FG 4.3% / BG 1.9%)的成熟做法, 三管齐下:
+  #   1) focal loss (Lin ICCV17, 降低易分负样本权重)   -> binary_gamma>0
+  #   2) pos_weight=(neg/pos)^0.25 (DeepEthogram 官方) -> binary_alpha_power
+  #   3) 稀有类偏置初始化 (DeepEthogram rare_class_bias) -> rare_class_bias_init
+  binary_gamma: 0.5
+  binary_label_smoothing: 0.05
+  binary_alpha_mode: deepethogram
+  binary_alpha_power: 0.25
+  binary_exclusivity_pairs: [[2, 3]]   # FG/BG 互斥 (Kalueff 梳理句法)
+  binary_exclusivity_weight: 0.05
+  rare_class_bias_init: true
+
+TRAIN:
+  epochs: 60                  # 60 epoch + early stop (patience 12)
+  batch_size: 8
+  grad_accum: 2               # 有效 batch = 16
+  lr: 0.0002
+  head_lr_mult: 10.0          # 分层 lr: head 用 2e-3, backbone 2e-4 (成熟迁移做法)
+  weight_decay: 0.0005
+  grad_clip: 1.0              # DeepEthogram 推荐 (防长程 NaN)
+  warmup_epochs: 5
+  lr_schedule: cosine
+  early_stop_patience: 12
+  mixed_precision: false      # fp32 (之前 fp16 溢出死锁教训)
+  num_workers: 4
+  clips_per_video: 60         # 每视频每 epoch 抽取 clip 数 (34视频×60=2040 sample/epoch)
+  val_samples_per_class: 200  # val/test 每类采样数 (保证 FG/BG 被评估)
+  seed: 42
+  split:
+    val_ratio: 0.15
+    test_ratio: 0.15
+  # 类别不平衡: 重采样 (Sakamoto 每 epoch 配额) + 加权损失
+  sampler_quota: false
+  sampler_weighted: true
+
+  # ---- VideoGLUE 冻结微调协议 (linear probe → LP-FT) ----
+  lp:
+    enable: true              # 先训 head (冻结 backbone)
+    epochs: 5
+    lr: 0.0005
+    head_lr_mult: 1.0         # LP 阶段只训 head, backbone 冻结
+  lpft:
+    enable: true              # LP 后解冻 backbone, 小 lr 微调 (LP-FT)
+    epochs: 60
+    lr: 0.0002
+    head_lr_mult: 10.0
+
+  # ---- 优化器超参搜索 (optuna) ----
+  search:
+    enable: false             # 用 scripts/03_search_hyperparams.py 时置 true
+    n_trials: 30
+    storage: "sqlite:///D:/DeepGroomNet_v3/outputs/search/study.db"
+    subset_videos: 12         # 快速迭代用的视频子集
+
+POSTPROCESS:
+  # DeepEthogram min_bout + Sakamoto 三规则
+  min_bout_per_behavior: true
+  min_bout_percentile: 1
+  sakamoto_filter: true       # ≤4帧孤立去除 / ≤6帧中断填补 / ≤4帧FG↔BG翻转
+  threshold_tune: true
+  # 时序平滑 (消除逐帧闪跳): smooth_probabilities + hmm_smooth
+  temporal_smooth: true
+  smooth_window: 3
+  # bout 统计输出 (DeepEthogram/MoSeq 口径)
+  bout_stats: true
+
+OUTPUT:
+  checkpoint_dir: "D:/DeepGroomNet_v3/outputs/checkpoints"
+  metric_dir: "D:/DeepGroomNet_v3/outputs/metrics"
+  log_dir: "D:/DeepGroomNet_v3/outputs/logs"
