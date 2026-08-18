@@ -25,8 +25,8 @@ import torch.nn as nn
 import yaml
 
 from data.dataset import FrameLevelDataset, make_pos_weight_from_videos
-from models.tadapanda_model import TAdaPandaModel, load_pretrained
-from losses.tadapanda import TadaPandaLoss
+from models.tadaconv_model import TAdaConvModel, load_pretrained
+from losses.auxiliary import AuxFocalLoss
 from postprocess.thresholds import (evaluate_thresholds, threshold_predict,
                                     compute_background, min_bout_per_behavior,
                                     binary_metrics, smooth_probabilities,
@@ -92,7 +92,7 @@ def macro_auprc(P, Y, class_names):
 
 def build_model(cfg, num_classes):
     m = cfg["MODEL"]
-    model = TAdaPandaModel(
+    model = TAdaConvModel(
         num_classes=num_classes,
         t_stride=1,                       # T=32
         drop_path=float(m.get("drop_path", 0.2)),
@@ -196,7 +196,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
             else:
                 logits, aux_logits = out, None
             oh = nn.functional.one_hot(y, num_classes=num_classes).float()
-            # TadaPandaLoss 内部: 主头 Focal + CPAM 条件自适应 (式8-10) + L2-SP
+            # AuxFocalLoss 内部: 主头 Focal + CPAM 条件自适应 (式8-10) + L2-SP
             loss, loss_dict = criterion(logits.float(), oh, aux_logits=aux_logits, model=model)
             data_loss = loss_dict.get("combined", loss).detach()
             opt.zero_grad()
@@ -303,6 +303,14 @@ def main():
     ap.add_argument("--subset-videos", type=int, default=None)
     ap.add_argument("--log-file", default=None,
                     help="将控制台输出同时写入该文件 (默认 outputs/logs/train_<时间>.log)")
+    # 消融开关: 显式覆盖 config 中的 stsa/cpam; 未给出则用 config 值
+    ap.add_argument("--stsa", type=lambda s: s.lower() in ("1", "true", "yes", "on"),
+                    default=None, help="override STSA on/off (None=use config)")
+    ap.add_argument("--cpam", type=lambda s: s.lower() in ("1", "true", "yes", "on"),
+                    default=None, help="override CPAM on/off (None=use config)")
+    # 输出 tag: 每个消融写独立 checkpoint/metric/log 目录
+    ap.add_argument("--tag", default=None,
+                    help="输出目录后缀 (outputs/checkpoints_<tag> 等); 默认 config 目录")
     args = ap.parse_args()
 
     # 自动落盘日志 (PyCharm 运行时也能生成, 便于后期优化)
@@ -336,6 +344,19 @@ def main():
     print(f"[log] 控制台输出已写入: {log_path}")
 
     cfg = yaml.safe_load(open(args.config, encoding="utf-8"))
+
+    # 消融开关覆盖
+    if args.stsa is not None:
+        cfg["MODEL"]["stsa"] = args.stsa
+    if args.cpam is not None:
+        cfg["MODEL"]["cpam"] = args.cpam
+
+    # 输出 tag: 独立目录, 避免消融间互相覆盖
+    if args.tag:
+        for k in ("checkpoint_dir", "metric_dir", "log_dir"):
+            if k in cfg["OUTPUT"]:
+                cfg["OUTPUT"][k] = f"{cfg['OUTPUT'][k]}_{args.tag}"
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     class_names = cfg["CLASSES"]["openfield"]
     num_classes = len(class_names)
@@ -361,9 +382,11 @@ def main():
 
     # 模型 + 损失
     model = build_model(cfg, num_classes).to(device)
+    print(f"[ABLATION] stsa={bool(cfg['MODEL']['stsa'])} cpam={bool(cfg['MODEL']['cpam'])} "
+          f"tag={args.tag or '(default)'}")
     # 稀有类偏置初始化, 用训练类别占比 (DeepEthogram rare_class_bias, 缓解早期全判负)
     model.set_head(num_classes, class_counts=cc)
-    criterion = TadaPandaLoss(
+    criterion = AuxFocalLoss(
         num_classes=num_classes,
         pos_weight=pw.to(device),
         gamma=float(cfg["LOSS"].get("binary_gamma", 0.5)),
@@ -397,8 +420,14 @@ def main():
         # 阶段1: Linear Probe -- 冻结主干(含STSA), 只训 head + cpam (新增模块保持可训)
         model.freeze_backbone()
         n_head_params = sum(p.numel() for p in model.head.parameters())
-        n_cpam_params = sum(p.numel() for p in model.cpam.parameters())
-        print(f"[LP] 冻结主干, 只训 head ({n_head_params}) + cpam ({n_cpam_params}) 参数")
+        n_cpam_params = (sum(p.numel() for p in model.cpam.parameters())
+                         if model.cpam is not None else 0)
+        n_stsa_params = (sum(p.numel() for p in model.stsa3.parameters())
+                         if model.stsa3 is not None else 0) + \
+                        (sum(p.numel() for p in model.stsa4.parameters())
+                         if model.stsa4 is not None else 0)
+        print(f"[LP] 冻结主干, 只训 head ({n_head_params}) + "
+              f"stsa ({n_stsa_params}) + cpam ({n_cpam_params}) 参数")
         train_stage(
             model, tr_ld, va_ld, cfg, criterion, class_names, device,
             num_classes,

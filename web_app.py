@@ -30,7 +30,7 @@ import torch.nn.functional as F
 
 warnings.filterwarnings('ignore')
 
-from models.tadapanda_model import TAdaPandaModel
+from models.tadaconv_model import TAdaConvModel
 
 os.environ['YOLO_SETTINGS_DIR'] = tempfile.gettempdir()
 from ultralytics import YOLO
@@ -347,8 +347,8 @@ def load_models(tadaconv_weight_path, yolo_det_path):
         if not os.path.exists(tadaconv_weight_path):
             st.error("TAdaConv weight file not found")
             return None, None
-        with st.spinner("Loading TAdaPanda model..."):
-            model = TAdaPandaModel(num_classes=NUM_CLASSES, t_stride=1,
+        with st.spinner("Loading TAdaConv model..."):
+            model = TAdaConvModel(num_classes=NUM_CLASSES, t_stride=1,
                                    use_cpam=True, use_stsa=True, drop_path=0.0).to(DEVICE)
             ckpt = torch.load(tadaconv_weight_path, map_location=DEVICE, weights_only=False)
             state = ckpt["model_state"] if "model_state" in ckpt else ckpt
@@ -356,8 +356,8 @@ def load_models(tadaconv_weight_path, yolo_det_path):
                 state = {k[len("model."):]: v for k, v in state.items() if k.startswith("model.")}
             model.load_state_dict(state, strict=False)
             model.eval()
-        st.success("✓ TAdaPanda model loaded successfully")
-        logger.info("TAdaPanda model loaded successfully")
+        st.success("✓ TAdaConv model loaded successfully")
+        logger.info("TAdaConv model loaded successfully")
         if not os.path.exists(yolo_det_path):
             st.error("YOLO weight file not found")
             return model, None

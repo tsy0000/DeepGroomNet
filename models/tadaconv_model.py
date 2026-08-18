@@ -1,5 +1,5 @@
 """
-TadaPandaModel - 完整模型组装 (TAdaConvNeXtV2 + STSA + CPAM + 双分类头)。
+TAdaConvModel - 完整模型组装 (TAdaConvNeXtV2 + STSA + CPAM + 双分类头)。
 
 严格遵循:
   1. 主干 = 官方 TAdaConv-main 的 TAdaConvNeXtV2 (third_party/tadaconv),
@@ -72,11 +72,11 @@ def load_pretrained(model, weight_path, device="cpu"):
             new_state[name] = v
             matched += 1
     model.load_state_dict(new_state, strict=False)
-    print(f"[TAdaPanda] loaded {matched}/{len(model_state)} params from {weight_path}")
+    print(f"[TAdaConv] loaded {matched}/{len(model_state)} params from {weight_path}")
     return model
 
 
-class TAdaPandaModel(nn.Module):
+class TAdaConvModel(nn.Module):
     """TAdaConvNeXtV2 主干 + STSA(Stage3/4) + CPAM(辅助) + 双分类头.
 
     Args:

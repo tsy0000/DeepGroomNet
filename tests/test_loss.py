@@ -3,7 +3,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-from losses.tadapanda import ConditionalLoss, FocalBCE, TadaPandaLoss
+from losses.auxiliary import ConditionalLoss, FocalBCE, AuxFocalLoss
 
 
 def test_conditional_branches():
@@ -43,9 +43,9 @@ def test_focal_posweight():
     print(f"[OK] focal loss={loss.item():.4f}")
 
 
-def test_tadapanda_loss_with_aux():
+def test_aux_focal_loss_with_aux():
     """组合损失: 主头 + CPAM 辅助头."""
-    loss_fn = TadaPandaLoss(num_classes=5, pos_weight=[1.0] * 5,
+    loss_fn = AuxFocalLoss(num_classes=5, pos_weight=[1.0] * 5,
                             gamma=0.5, l2sp_weight=0.0)
     logits = torch.randn(4, 5)
     aux = torch.randn(4, 5)
@@ -56,9 +56,9 @@ def test_tadapanda_loss_with_aux():
     print(f"[OK] total={total.item():.4f}, dict keys={list(d.keys())}")
 
 
-def test_tadapanda_loss_no_aux():
+def test_aux_focal_loss_no_aux():
     """无辅助头时退化为纯 L_CE."""
-    loss_fn = TadaPandaLoss(num_classes=5, pos_weight=None, gamma=0.0, l2sp_weight=0.0)
+    loss_fn = AuxFocalLoss(num_classes=5, pos_weight=None, gamma=0.0, l2sp_weight=0.0)
     logits = torch.randn(4, 5)
     targets = (torch.rand(4, 5) > 0.6).float()
     total, d = loss_fn(logits, targets, aux_logits=None)
@@ -71,6 +71,6 @@ if __name__ == "__main__":
     test_conditional_branches()
     test_conditional_symmetry()
     test_focal_posweight()
-    test_tadapanda_loss_with_aux()
-    test_tadapanda_loss_no_aux()
+    test_aux_focal_loss_with_aux()
+    test_aux_focal_loss_no_aux()
     print("损失模块全部测试通过")

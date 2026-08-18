@@ -93,14 +93,17 @@ class L2SPRegularizer(nn.Module):
         self.ignore_names = ignore_names
 
     def forward(self, model):
-        reg = 0.0
+        reg = None
         for name, p in model.named_parameters():
             if p.requires_grad and not any(k in name for k in self.ignore_names):
-                reg = reg + torch.sum(p ** 2)
+                reg = reg + torch.sum(p ** 2) if reg is not None \
+                    else torch.sum(p ** 2)
+        if reg is None:
+            return 0.0
         return self.weight * reg
 
 
-class TadaPandaLoss(nn.Module):
+class AuxFocalLoss(nn.Module):
     """组合损失: 主头 FocalBCE + CPAM 条件辅助 (式8-10) + L2-SP.
 
     Args:
@@ -148,9 +151,10 @@ class TadaPandaLoss(nn.Module):
 
         if model is not None:
             l2 = self.l2sp(model)
+            l2 = torch.as_tensor(l2, dtype=torch.float32, device=logits.device)
             loss_dict["L2-SP"] = l2.detach()
         else:
-            l2 = 0.0
+            l2 = torch.zeros((), dtype=torch.float32, device=logits.device)
 
         total = data_loss + l2
         loss_dict["total"] = total.detach()

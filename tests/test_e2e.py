@@ -1,7 +1,7 @@
 """端到端测试: 过拟合小数据集 (验证模型能学会记忆训练集).
 
 用合成数据 (有限样本) 训练, 观察训练 loss 显著下降, 证明
-TAdaPandaModel + 条件损失 + Lightning 全链路可收敛。
+TAdaConvModel + 条件损失 + Lightning 全链路可收敛。
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,8 +10,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from train.lightning_module import TadaPandaLightning
-from models.tadapanda_model import TAdaPandaModel
+from train.lightning_module import TAdaConvLightning
+from models.tadaconv_model import TAdaConvModel
 
 CFG = {
     "MODEL": {"cpam": True, "stsa": True, "cpam_alpha": 0.9, "cpam_beta": 0.1,
@@ -36,7 +36,7 @@ def run_overfit(epochs=5):
     ds = TensorDataset(x, y)
     dl = DataLoader(ds, batch_size=2, shuffle=True)
 
-    m = TadaPandaLightning(CFG, num_classes=5, pos_weight=None)
+    m = TAdaConvLightning(CFG, num_classes=5, pos_weight=None)
     m.set_phase("lpft")   # 解冻全部 (小数据快速过拟合验证)
 
     optimizers, _ = m.configure_optimizers()

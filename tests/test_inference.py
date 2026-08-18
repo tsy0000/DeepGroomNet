@@ -1,4 +1,4 @@
-"""推理模块测试: TAdaPandaModel 滑窗逐帧 + 后处理 (合成数据)."""
+"""推理模块测试: TAdaConvModel 滑窗逐帧 + 后处理 (合成数据)."""
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -7,8 +7,8 @@ import torch
 import cv2
 import tempfile
 
-from models.tadapanda_model import TAdaPandaModel
-from inference.predict import load_tadapanda_model, sliding_window_probs, predict_video
+from models.tadaconv_model import TAdaConvModel
+from inference.predict import load_tadaconv_model, sliding_window_probs, predict_video
 
 CFG = {
     "MODEL": {"cpam": True, "stsa": True},
@@ -30,7 +30,7 @@ def make_video(path, n_frames=64, size=64):
 
 
 def test_sliding_window():
-    model = TAdaPandaModel(num_classes=5, t_stride=1, use_cpam=True, use_stsa=True)
+    model = TAdaConvModel(num_classes=5, t_stride=1, use_cpam=True, use_stsa=True)
     model.eval()
     with tempfile.TemporaryDirectory() as tmp:
         vpath = os.path.join(tmp, "t.mp4")
@@ -42,7 +42,7 @@ def test_sliding_window():
 
 
 def test_predict_video():
-    model = TAdaPandaModel(num_classes=5, t_stride=1, use_cpam=True, use_stsa=True)
+    model = TAdaConvModel(num_classes=5, t_stride=1, use_cpam=True, use_stsa=True)
     model.eval()
     with tempfile.TemporaryDirectory() as tmp:
         vpath = os.path.join(tmp, "t.mp4")
@@ -57,10 +57,10 @@ def test_predict_video():
 def test_load_model():
     with tempfile.TemporaryDirectory() as tmp:
         # 构造一个权重文件
-        m = TAdaPandaModel(num_classes=5, t_stride=1)
+        m = TAdaConvModel(num_classes=5, t_stride=1)
         ck = os.path.join(tmp, "m.pt")
         torch.save({"model_state": m.state_dict()}, ck)
-        m2 = load_tadapanda_model(CFG, 5, ckpt_path=ck, device="cpu")
+        m2 = load_tadaconv_model(CFG, 5, ckpt_path=ck, device="cpu")
         assert m2 is not None
         print("[OK] 模型加载正常")
 

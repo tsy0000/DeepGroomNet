@@ -1,8 +1,8 @@
-"""推理模块: 用 TAdaPandaModel (TAdaConvNeXtV2 + CPAM + STSA) 做滑窗逐帧预测.
+"""推理模块: 用 TAdaConvModel (TAdaConvNeXtV2 + CPAM + STSA) 做滑窗逐帧预测.
 
 - sliding_window_probs: 对视频做滑窗逐帧推断 (T=32), 返回逐帧概率 [N, K].
 - predict_video: 单视频完整流程 (概率 -> 平滑 -> 阈值 -> background -> min_bout -> MoSeq 边界).
-- load_tadapanda_model: 加载 TAdaPandaModel + 权重.
+- load_tadaconv_model: 加载 TAdaConvModel + 权重.
 
 用法:
     python -m inference.predict --video xxx.mp4 --ckpt outputs/checkpoints/lpft_best.pt
@@ -17,16 +17,16 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "third_party"))
 
 import cv2
-from models.tadapanda_model import TAdaPandaModel
+from models.tadaconv_model import TAdaConvModel
 from postprocess.thresholds import (threshold_predict, compute_background,
                                     min_bout_per_behavior, smooth_probabilities,
                                     syllable_boundaries, moseq_boundary_refine)
 
 
-def load_tadapanda_model(cfg, num_classes, ckpt_path=None, device="cpu"):
-    """构建 TAdaPandaModel 并加载权重."""
+def load_tadaconv_model(cfg, num_classes, ckpt_path=None, device="cpu"):
+    """构建 TAdaConvModel 并加载权重."""
     m = cfg["MODEL"]
-    model = TAdaPandaModel(
+    model = TAdaConvModel(
         num_classes=num_classes,
         t_stride=1,
         use_cpam=bool(m.get("cpam", True)),

@@ -1,6 +1,6 @@
 """DeepGroomNet - Lightning 训练模块.
 
-- TadaPandaLightning: LightningModule, 双分类头 + 条件自适应损失 (式8-10).
+- TAdaConvLightning: LightningModule, 双分类头 + 条件自适应损失 (式8-10).
 - 冻结策略: LP-FT (Linear Probe -> Full Fine-Tune).
     LP 阶段: 冻结主干 (含 STSA), 只训 head + CPAM 辅助头.
     LP-FT 阶段: 冻结 Stage1-3, 解冻 Stage4 + STSA + CPAM + head.
@@ -11,12 +11,12 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 
-from models.tadapanda_model import TAdaPandaModel
-from losses.tadapanda import TadaPandaLoss
+from models.tadaconv_model import TAdaConvModel
+from losses.auxiliary import AuxFocalLoss
 
 
-class TadaPandaLightning(pl.LightningModule):
-    """TAdaPandaModel 的 Lightning 封装.
+class TAdaConvLightning(pl.LightningModule):
+    """TAdaConvModel 的 Lightning 封装.
 
     Args:
         cfg (dict): 配置字典 (config.yaml 解析后).
@@ -33,7 +33,7 @@ class TadaPandaLightning(pl.LightningModule):
         self.freeze_stages = freeze_stages
 
         m = cfg["MODEL"]
-        self.model = TAdaPandaModel(
+        self.model = TAdaConvModel(
             num_classes=num_classes,
             t_stride=1,                       # T=32
             t_kernel_size=3,
@@ -42,7 +42,7 @@ class TadaPandaLightning(pl.LightningModule):
             use_stsa=bool(m.get("stsa", True)),
         )
 
-        self.loss_fn = TadaPandaLoss(
+        self.loss_fn = AuxFocalLoss(
             num_classes=num_classes,
             pos_weight=pos_weight,
             gamma=float(cfg["LOSS"].get("binary_gamma", 0.5)),
@@ -64,7 +64,7 @@ class TadaPandaLightning(pl.LightningModule):
         # 只加载主干匹配的键 (前缀对齐: 主干权重直接匹配模型命名)
         model_sd = self.model.state_dict()
         miss, unexp = self.model.load_state_dict(sd, strict=False)
-        print(f"[TadaPanda] 预训练加载完成. missing={len(miss.missing_keys)} "
+        print(f"[TAdaConv] 预训练加载完成. missing={len(miss.missing_keys)} "
               f"unexpected={len(miss.unexpected_keys)}")
 
     def _freeze(self, names_containing):

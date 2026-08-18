@@ -4,7 +4,7 @@ import os
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
-from .lightning_module import TadaPandaLightning
+from .lightning_module import TAdaConvLightning
 
 
 def build_trainer(cfg, stage):
@@ -50,7 +50,7 @@ def run_pipeline(cfg, tr_loader, va_loader, num_classes, pos_weight):
     t = cfg["TRAIN"]
 
     # ---- LP: 冻结主干, 只训 head + cpam ----
-    lp_model = TadaPandaLightning(cfg, num_classes=num_classes, pos_weight=pos_weight,
+    lp_model = TAdaConvLightning(cfg, num_classes=num_classes, pos_weight=pos_weight,
                                   freeze_stages=None)
     lp_model.set_phase("lp")
     if t.get("lp", {}).get("enable", True):

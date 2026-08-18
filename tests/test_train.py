@@ -3,7 +3,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-from train.lightning_module import TadaPandaLightning
+from train.lightning_module import TAdaConvLightning
 
 CFG = {
     "MODEL": {"cpam": True, "stsa": True, "cpam_alpha": 0.9, "cpam_beta": 0.1,
@@ -16,7 +16,7 @@ CFG = {
 
 
 def test_build():
-    m = TadaPandaLightning(CFG, num_classes=5, pos_weight=None)
+    m = TAdaConvLightning(CFG, num_classes=5, pos_weight=None)
     x = torch.randn(2, 3, 32, 224, 224)
     logits, aux = m(x)
     assert logits.shape == (2, 5)
@@ -25,7 +25,7 @@ def test_build():
 
 
 def test_freeze_lp():
-    m = TadaPandaLightning(CFG, num_classes=5, pos_weight=None)
+    m = TAdaConvLightning(CFG, num_classes=5, pos_weight=None)
     m.set_phase("lp")
     # 主干应冻结
     frozen = sum(1 for n, p in m.model.named_parameters() if not p.requires_grad)
@@ -37,7 +37,7 @@ def test_freeze_lp():
 
 
 def test_freeze_lpft():
-    m = TadaPandaLightning(CFG, num_classes=5, pos_weight=None)
+    m = TAdaConvLightning(CFG, num_classes=5, pos_weight=None)
     m.set_phase("lpft")
     # Stage1-3 (stages.0/1/2) 应冻结
     s0_frozen = not next(m.model.stages[0].parameters()).requires_grad
@@ -48,7 +48,7 @@ def test_freeze_lpft():
 
 
 def test_train_step():
-    m = TadaPandaLightning(CFG, num_classes=5, pos_weight=None)
+    m = TAdaConvLightning(CFG, num_classes=5, pos_weight=None)
     m.set_phase("lpft")
     x = torch.randn(2, 3, 32, 224, 224)
     y = torch.randint(0, 5, (2,))
@@ -58,7 +58,7 @@ def test_train_step():
 
 
 def test_optimizer():
-    m = TadaPandaLightning(CFG, num_classes=5, pos_weight=None)
+    m = TAdaConvLightning(CFG, num_classes=5, pos_weight=None)
     m.set_phase("lpft")
     optimizers, schedulers = m.configure_optimizers()
     assert len(optimizers) == 1
