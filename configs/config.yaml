@@ -2,7 +2,7 @@
 # DeepGroomNet_v3 配置
 # 架构决策（基于成熟项目调研：DeepEthogram + Sakamoto + TAdaConv）：
 #   - Backbone: TAdaConvNeXtV2-Tiny (K400 官方权重, 时域自适应适合理毛微动作)
-#   - 输入: RGB[3] + 帧差[1] = 4 通道 × 16 帧 (Sakamoto 差分思想, 零训练成本)
+#   - 输入: RGB[3] × 32 帧 (TAdaConv 时域自适应卷积内部建模运动)
 #   - Head: 多标签 sigmoid 5 类 (background=其余行为逻辑非, DeepEthogram)
 #   - 损失: 加权 BCE + label smoothing 0.05 + FG/BG 互斥 + 分层 lr
 #   - 增强: DeepEthogram 官方 (轻量, 不用 Mixup/RandAugment 强增强破坏微动作)
@@ -90,9 +90,10 @@ TRAIN:
   split:
     val_ratio: 0.15
     test_ratio: 0.15
-  # 类别不平衡: 重采样 (Sakamoto 每 epoch 配额) + 加权损失
+  # 类别不平衡: 重采样 (DeepEthogram WeightedRandomSampler 过采样稀有类) + 加权损失
   sampler_quota: false
   sampler_weighted: true
+  sampler_power: 0.5        # 采样放大指数 (DeepEthogram ~0.5)
 
   # ---- VideoGLUE 冻结微调协议 (linear probe → LP-FT) ----
   lp:

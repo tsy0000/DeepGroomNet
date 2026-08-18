@@ -1,47 +1,63 @@
+# -*- coding: utf-8 -*-
 """数据加载器 + 类别不平衡处理 (过采样/加权采样, DeepEthogram 范式).
 
-类别不平衡 (FG 4.3% / BG 1.9%) 的成熟做法:
+类别不平衡 (FG 4.3% / BG 1.9%) 的成熟做法 (DeepEthogram 官方):
   1. pos_weight 加权损失 (已在 losses 处理).
   2. 训练期加权采样 (oversample 稀有类) - 本模块实现.
+  3. 稀有类偏置初始化 (已在 loss 内, rare_class_bias_init).
 
-Sakamoto 每 epoch 配额思路: 用 WeightedRandomSampler 按类别频率倒数采样,
-保证每个 batch 稀有类出现概率提升.
+加权采样器按"每视频帧级类别频率"给样本权重: 稀有类占比高的视频权重放大,
+从而每个 epoch 稀有类样本被抽到的概率提升。权重长度 = len(dataset) 精确对齐
+FrameLevelDataset (每个样本 idx -> videos[idx // clips_per_video])。
 """
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from .dataset import FrameLevelDataset, make_pos_weight_from_videos
 
 
-def build_oversampled_sampler(videos, class_names, power=0.5, seed=42):
-    """为每个视频窗口起点生成采样权重, 稀有类过采样.
+def build_oversampled_sampler(dataset, power=0.5, seed=42, videos=None):
+    """为 dataset 的每个样本生成采样权重, 稀有类过采样。
 
-    权重 = (1 / 类别频率) ^ power。每视频每 clip 起点一个样本权重。
+    weights[i]: 样本 i 所在视频的类别不平衡度。对视频内各类别频率取
+    (1/freq)^power, 用视频内各类别的最大提升(稀有类占比越高权重越大),
+    并归一化到与样本数对齐。
+
+    Args:
+        dataset: FrameLevelDataset (需有 .videos, .class_names, .clips_per_video)
+        power: 放大指数 (DeepEthogram 用 ~0.5).
+        videos: 可选, 覆盖 dataset.videos.
     """
-    from collections import Counter
-    import random
-    random.seed(seed)
+    import numpy as np
+    gen = torch.Generator().manual_seed(seed)
+    videos = videos if videos is not None else dataset.videos
+    class_names = dataset.class_names
+    K = len(class_names)
 
-    weights = []
+    # 每视频: 各类别帧频率
+    freq = []  # freq[v][c] = 该视频 c 类帧占比
     for v in videos:
-        labels = torch.tensor(v["labels"], dtype=torch.long)
-        cls = labels.float().mean(dim=0) if labels.dim() > 1 else None
-        # 单标签模式: labels 是 (N,) 类索引
-        n = v["n_frames"]
-        start_centers = range(0, max(1, n), max(1, n // 500))  # 每视频采样中心
-        for c in start_centers:
-            if labels.dim() == 1:
-                c_ = labels[min(c, n - 1)]
-                # 稀有类放大
-                freq = (labels == c_).float().mean().clamp(min=1e-3)
-                w = (1.0 / freq) ** power
-            else:
-                # 多标签: 用最小类概率放大
-                idx = min(c, n - 1)
-                probs = labels[idx]
-                freq = probs.mean().clamp(min=1e-3)
-                w = (1.0 / freq) ** power
-            weights.append(float(w))
-    return weights
+        labels = np.asarray(v["labels"])
+        cnt = np.bincount(labels, minlength=K).astype(np.float64)
+        cnt = np.clip(cnt, 1e-3, None)
+        total = cnt.sum()
+        freq.append(cnt / total)
+
+    n_videos = len(videos)
+    cper = getattr(dataset, "clips_per_video", 1)
+    n_samples = len(dataset)
+
+    weights = np.zeros(n_samples, dtype=np.float64)
+    for i in range(n_samples):
+        vi = i // cper if cper > 0 else 0
+        vi = min(vi, n_videos - 1)
+        f = freq[vi]
+        w = float(np.max((1.0 / f) ** power))   # 取该视频稀有类放大后的最大权重
+        weights[i] = w
+
+    # 归一化到均值 1, 避免数值过大
+    if weights.sum() > 0:
+        weights = weights / weights.mean()
+    return torch.from_numpy(weights).float()
 
 
 def build_loader(dataset, cfg, split="train", batch_size=8, num_workers=4,
@@ -51,7 +67,7 @@ def build_loader(dataset, cfg, split="train", batch_size=8, num_workers=4,
               pin_memory=torch.cuda.is_available(), drop_last=(split == "train"))
 
     if split == "train" and weighted and hasattr(dataset, "videos"):
-        weights = build_oversampled_sampler(dataset.videos, dataset.class_names)
+        weights = build_oversampled_sampler(dataset)
         gen = torch.Generator().manual_seed(seed)
         sampler = WeightedRandomSampler(weights, num_samples=len(dataset),
                                         replacement=True, generator=gen)

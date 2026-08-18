@@ -25,13 +25,14 @@ import torch.nn as nn
 import yaml
 
 from data.dataset import FrameLevelDataset, make_pos_weight_from_videos
+from data.dataloaders import build_loader
 from models.tadaconv_model import TAdaConvModel, load_pretrained
 from losses.auxiliary import AuxFocalLoss
 from postprocess.thresholds import (evaluate_thresholds, threshold_predict,
                                     compute_background, min_bout_per_behavior,
                                     binary_metrics, smooth_probabilities,
                                     hmm_smooth, bout_stats)
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader  # noqa: F401
 from tqdm import tqdm
 
 
@@ -273,7 +274,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
               f"AUROC={macro_auroc(P, Y, class_names):.3f} | "
               f"grad_L2={grad_epoch['grad_l2']:.1e} grad_max={grad_epoch['grad_max']:.1e} "
               f"grad_NaN={grad_epoch['grad_nan']}", flush=True)
-        print(f"[{tag}] {'琛屼负':<12}{'Acc':>7}{'F1':>7}{'Recall':>8}{'Precision':>10}", flush=True)
+        print(f"[{tag}] {'Class':<12}{'Acc':>7}{'F1':>7}{'Recall':>8}{'Precision':>10}", flush=True)
         for c in class_names:
             pc = per_class[c]
             print(f"[{tag}] {c:<12}{pc['accuracy']:>6.1f}%{pc['f1']:>6.1f}%"
@@ -398,10 +399,15 @@ def main():
 
     bs = int(cfg["TRAIN"]["batch_size"])
     nw = int(cfg["TRAIN"]["num_workers"])
-    tr_ld = DataLoader(train_ds, batch_size=bs, shuffle=True, num_workers=nw,
-                       persistent_workers=True, pin_memory=True)
-    va_ld = DataLoader(val_ds, batch_size=bs, shuffle=False, num_workers=nw,
-                       persistent_workers=True, pin_memory=True)
+    use_wtsampler = bool(cfg["TRAIN"].get("sampler_weighted", False))
+    tr_ld = build_loader(train_ds, cfg, split="train", batch_size=bs,
+                         num_workers=nw, weighted=use_wtsampler,
+                         seed=int(cfg["TRAIN"].get("seed", 42)))
+    if use_wtsampler:
+        print(f"[sampler] 训练启用 WeightedRandomSampler 过采样稀有类 "
+              f"(power={cfg['TRAIN'].get('sampler_power', 0.5)})")
+    va_ld = build_loader(val_ds, cfg, split="val", batch_size=bs,
+                         num_workers=nw, shuffle=False)
 
     warmup = int(cfg["TRAIN"].get("warmup_epochs", 8))
     patience = int(cfg["TRAIN"].get("early_stop_patience", 12))
@@ -458,8 +464,8 @@ def main():
         print(f"\n[TEST] 在 test 集 ({len(test_v)} 视频) 评估最佳模型..")
         test_ds = FrameLevelDataset(test_v, cfg, split="val",
                                     class_names=class_names, frame_window=frame_window)
-        test_ld = DataLoader(test_ds, batch_size=bs, shuffle=False,
-                             num_workers=nw, persistent_workers=True, pin_memory=True)
+        test_ld = build_loader(test_ds, cfg, split="val", batch_size=bs,
+                               num_workers=nw, shuffle=False)
         best_ckpt = os.path.join(ckpt_dir, "lpft_best.pt")
         if os.path.exists(best_ckpt):
             ck = torch.load(best_ckpt, map_location=device, weights_only=False)
@@ -479,7 +485,7 @@ def main():
         tpc = binary_class_metrics(eye, pred, class_names)
         tf1 = f1_macro_from(tpc, class_names)
         print(f"[TEST] F1_macro={tf1:.2f}")
-        print(f"[TEST] {'琛屼负':<12}{'Acc':>7}{'F1':>7}{'Recall':>8}{'Precision':>10}")
+        print(f"[TEST] {'Class':<12}{'Acc':>7}{'F1':>7}{'Recall':>8}{'Precision':>10}")
         for c in class_names:
             pc = tpc[c]
             print(f"[TEST] {c:<12}{pc['accuracy']:>6.1f}%{pc['f1']:>6.1f}%"
