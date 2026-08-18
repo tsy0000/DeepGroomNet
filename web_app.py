@@ -30,7 +30,7 @@ import torch.nn.functional as F
 
 warnings.filterwarnings('ignore')
 
-from models.backbones.tadaconvnext import TAdaConvNeXtV2
+from models.tadapanda_model import TAdaPandaModel
 
 os.environ['YOLO_SETTINGS_DIR'] = tempfile.gettempdir()
 from ultralytics import YOLO
@@ -64,7 +64,7 @@ apply_global_styling()
 CLASS_NAMES = ['Locomote', 'Rear', 'FaceGroom', 'BodyGroom', 'background']
 BG_NAME = 'background'
 NUM_CLASSES = len(CLASS_NAMES)
-NUM_FRAMES = 16
+NUM_FRAMES = 32
 TARGET_SIZE = (224, 224)
 BOX_EXPANSION_RATIO = 1.5
 MEAN = [0.45, 0.45, 0.45]
@@ -347,16 +347,17 @@ def load_models(tadaconv_weight_path, yolo_det_path):
         if not os.path.exists(tadaconv_weight_path):
             st.error("TAdaConv weight file not found")
             return None, None
-        with st.spinner("Loading TAdaConv model..."):
-            mc = SimpleNamespace(num_classes=NUM_CLASSES, cpam=True, cpam_beta=0.1,
-                                 cpam_alpha=0.9, dropout=0.0)
-            model = TAdaConvNeXtV2(mc).to(DEVICE)
+        with st.spinner("Loading TAdaPanda model..."):
+            model = TAdaPandaModel(num_classes=NUM_CLASSES, t_stride=1,
+                                   use_cpam=True, use_stsa=True, drop_path=0.0).to(DEVICE)
             ckpt = torch.load(tadaconv_weight_path, map_location=DEVICE, weights_only=False)
             state = ckpt["model_state"] if "model_state" in ckpt else ckpt
+            if isinstance(state, dict) and any(k.startswith("model.") for k in state):
+                state = {k[len("model."):]: v for k, v in state.items() if k.startswith("model.")}
             model.load_state_dict(state, strict=False)
             model.eval()
-        st.success("✓ TAdaConv loaded successfully")
-        logger.info("TAdaConv model loaded successfully")
+        st.success("✓ TAdaPanda model loaded successfully")
+        logger.info("TAdaPanda model loaded successfully")
         if not os.path.exists(yolo_det_path):
             st.error("YOLO weight file not found")
             return model, None

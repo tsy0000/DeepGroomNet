@@ -24,7 +24,7 @@ CLASSES:
   exclusive_pairs: [[2, 3]]
 
 CLIP:
-  num_input_frames: 16        # 16 帧 (0.53s), 成熟做法: 足够捕捉理毛 bout 起始
+  num_input_frames: 32        # 32 帧 (1.07s), TAdaConvNeXtV2 t_stride=1 时间全程保留
   target_size: 224
   # 预训练对齐: 官方 TAdaConv finetune.yaml MEAN=0.45 STD=0.225 (输入已 /255)
   norm_mean: 0.45
@@ -47,9 +47,11 @@ CLIP:
 MODEL:
   backbone: "tadaconvnextv2_tiny"
   pretrained: "D:/DeepGroomNet_v3/weights/tadaconvnextv2_tiny_in1k_k400_79.6.pyth"
-  # 纯官方 TAdaConvNeXtV2 主干 + 官方 BaseHead 分类头
-  # 局部细粒度模块: CPAM (Swin-Panda 多stage融合+辅助损失, 严格按原文)
-  cpam: true
+  # 主干 = 官方 TAdaConvNeXtV2-Tiny (t_stride=1 -> T=32), 严格官方源码
+  # 插入两个模块 (Swin-Panda): STSA(Stage3/4) + CPAM(辅助多尺度融合)
+  stsa: true                  # 可开关: STSA 空间移位注意力 (Stage3/4 之后)
+  cpam: true                  # 可开关: CPAM 辅助监督 (取 4 个原始 stage 特征)
+  cpam_temporal_mixer: true   # CPAM 内 (3,1,1) Temporal Mixer
   cpam_alpha: 0.9
   cpam_beta: 0.1
 

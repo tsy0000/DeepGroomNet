@@ -1,18 +1,16 @@
-"""DeepGroomNet_v3 - 损失函数（完全对齐 DeepEthogram 官方实现）。
+"""DeepGroomNet - 多标签行为分类损失（自研实现）。
 
-- BinaryFocalLoss: pos_weight BCE + focal(γ) + label_smoothing*2 + ignore_index mask
+- FocalLossBCE: pos_weight BCE + focal(γ) + label_smoothing + ignore_index mask
 - L2SPRegularizer: L2-SP 向预训练权重衰减（只对 2D 权重，α/β）
 - ClassificationLoss: data_loss + reg_loss
-
-源码依据: deepethogram/feature_extractor/losses.py
 """
 import numpy as np
 import torch
 import torch.nn as nn
 
 
-class BinaryFocalLoss(nn.Module):
-    """DeepEthogram BinaryFocalLoss（多标签 BCE + focal + label smoothing）。"""
+class FocalLossBCE(nn.Module):
+    """多标签 BCE + focal + label smoothing（处理类别极度不平衡）。"""
 
     def __init__(self, pos_weight=None, ignore_index=-1, gamma=0.0, label_smoothing=0.0,
                  exclusive_pairs=None, exclusive_weight=0.0):
@@ -114,9 +112,9 @@ class ClassificationLoss(nn.Module):
 def build_loss(cfg, class_counts):
     """按 config 构建总损失 (DeepEthogram ClassificationLoss)。"""
     L = cfg["LOSS"]
-    pw = BinaryFocalLoss.make_pos_weight(class_counts,
+    pw = FocalLossBCE.make_pos_weight(class_counts,
                                          power=float(L.get("binary_alpha_power", 0.25)))
-    data_criterion = BinaryFocalLoss(
+    data_criterion = FocalLossBCE(
         pos_weight=pw,
         gamma=float(L.get("binary_gamma", 0.0)),
         label_smoothing=float(L.get("binary_label_smoothing", 0.05)),

@@ -1,11 +1,9 @@
-"""DeepGroomNet_v3 - 优化器/超参搜索。
-
-用 optuna (若未安装则退化为轻量随机搜索) 搜索训练超参,
-目标 = val F1_macro (与 train.py 同一后处理口径)。
-
-用法:
+﻿"""DeepGroomNet_v3 - 浼樺寲鍣?瓒呭弬鎼滅储銆?
+鐢?optuna (鑻ユ湭瀹夎鍒欓€€鍖栦负杞婚噺闅忔満鎼滅储) 鎼滅储璁粌瓒呭弬,
+鐩爣 = val F1_macro (涓?train.py 鍚屼竴鍚庡鐞嗗彛寰?銆?
+鐢ㄦ硶:
   D:\\Anaconda3\\envs\\python310\\python.exe scripts/03_search_hyperparams.py --trials 20
-  可选: --config configs/config.yaml --subset-videos 12
+  鍙€? --config configs/config.yaml --subset-videos 12
 """
 import os
 import sys
@@ -22,7 +20,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from data.dataset import FrameLevelDataset, make_pos_weight_from_videos
-from losses.deepethogram import BinaryFocalLoss, L2SPRegularizer
+from losses.classification import FocalLossBCE, L2SPRegularizer
 from scripts.train import build_model, cosine_with_warmup, make_optimizer
 
 try:
@@ -56,21 +54,20 @@ def run_trial(cfg, params, device):
     num_classes = len(class_names)
     frame_window = int(cfg["CLIP"]["num_input_frames"])
     bs = int(params["batch_size"])
-    nw = 0  # 搜索阶段用 0 worker 省内存
-    tr_ld, va_ld, pw = build_dataloaders(cfg, class_names, frame_window,
+    nw = 0  # 鎼滅储闃舵鐢?0 worker 鐪佸唴瀛?    tr_ld, va_ld, pw = build_dataloaders(cfg, class_names, frame_window,
                                          int(cfg["TRAIN"]["search"].get("subset_videos", 12)),
                                          bs, nw)
     model = build_model(cfg, num_classes).to(device)
-    criterion = BinaryFocalLoss(
+    criterion = FocalLossBCE(
         pos_weight=pw.to(device),
         gamma=0.0,
         label_smoothing=float(cfg["LOSS"].get("binary_label_smoothing", 0.05)),
     )
     l2sp = L2SPRegularizer(model, alpha=1e-5, beta=1e-3)
-    # 搜索阶段直接全量训 (LP-FT) 少量 epoch
+    # 鎼滅储闃舵鐩存帴鍏ㄩ噺璁?(LP-FT) 灏戦噺 epoch
     model.freeze_backbone()
     make_optimizer(model, params["lp_lr"], 1.0, params["weight_decay"])
-    # 用短 LP 找到 head, 再 LP-FT
+    # 鐢ㄧ煭 LP 鎵惧埌 head, 鍐?LP-FT
     epochs = max(2, int(params["epochs"]) // 3)
     from scripts.train import train_stage
     model.unfreeze_all()
@@ -121,7 +118,7 @@ def f1_macro(P, Y, class_names):
 
 
 def sample_params(trial):
-    if trial is None:  # 随机搜索
+    if trial is None:  # 闅忔満鎼滅储
         import random
         def lp(k): return 10 ** random.uniform(*k)
         return {
