@@ -176,6 +176,28 @@ class TAdaConvModel(nn.Module):
             nn.init.constant_(new_lin.bias, 0)
         self.head[1] = new_lin
 
+    def set_num_classes(self, num_classes, class_counts=None):
+        """同时切换主分类头 + CPAM 辅助头 的类别数 (OFT预训练 <-> 正式训练 维度切换).
+
+        Args:
+            num_classes: 新类别数
+            class_counts: 可选, 稀有类偏置初始化用的每类帧数
+        """
+        self.set_head(num_classes, class_counts=class_counts)
+        if self.cpam is not None:
+            aux = self.cpam.aux_head
+            lin = aux[-1]
+            dev = lin.weight.device
+            new_lin = nn.Linear(lin.in_features, num_classes).to(dev)
+            nn.init.trunc_normal_(new_lin.weight, std=0.02)
+            if class_counts is not None:
+                cc = torch.as_tensor(class_counts, dtype=torch.float32, device=dev).clamp(min=1.0)
+                pi = cc / cc.sum()
+                new_lin.bias.data.copy_((-torch.log((1.0 - pi) / (pi + 1e-8))).clamp(-5.0, 5.0))
+            else:
+                nn.init.constant_(new_lin.bias, 0)
+            aux[-1] = new_lin
+
     def freeze_backbone(self):
         """LP 阶段: 冻结主干(含STSA/norm), 只训 head + cpam (新增模块保持可训)."""
         for p in self.downsample_layers.parameters():

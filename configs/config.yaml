@@ -16,6 +16,10 @@ DATA:
     - "E:/tsy/datasetssap3"
   clip_output_root: "D:/DeepGroomNet_v3/outputs/clips"
   meta_root: "D:/DeepGroomNet_v3/outputs/meta"
+  # 外部泛化测试集 (仅评估, 不训练): 7 类标签, Defecate/Jump 不纳入(归 background)
+  opto_test_root: "E:/tsy/datasetsopto"
+  # OFT 预训练数据 (Sturman-OFT, 4类: Supported/Unsupported/Grooming/Jumping)
+  offtrain_root: "E:/tsy/downloaddatasets2"
 
 CLASSES:
   # 5 类目标 (旷场), background=非行为(Micromovement)
@@ -80,8 +84,8 @@ TRAIN:
   warmup_epochs: 5
   lr_schedule: cosine
   early_stop_patience: 12
-  # 早停/选模型指标: auroc (阈值无关, 推荐, 迁移自 DeepEthogram/sklearn) / auprc / f1
-  select_metric: auroc
+  # 早停/选模型指标 (官方 DeepEthogram: 去 background 的类平均 F1) / auroc / auprc / f1
+  select_metric: f1_nobg
   mixed_precision: false      # fp32 (之前 fp16 溢出死锁教训)
   num_workers: 4
   clips_per_video: 60         # 每视频每 epoch 抽取 clip 数 (34视频×60=2040 sample/epoch)
@@ -90,12 +94,17 @@ TRAIN:
   split:
     val_ratio: 0.15
     test_ratio: 0.15
-  # 类别不平衡: 重采样 (DeepEthogram WeightedRandomSampler 过采样稀有类) + 加权损失
-  sampler_quota: false
-  sampler_weighted: true
-  sampler_power: 0.5        # 采样放大指数 (DeepEthogram ~0.5)
+  # 类别不平衡: 类平衡过采样 (逐类均匀抽中心帧窗口) + 加权损失
+  sampler_balanced: true    # 过采样: 每类样本占比均匀 (替换旧版失效的 weighted sampler)
 
-  # ---- VideoGLUE 冻结微调协议 (linear probe → LP-FT) ----
+  # ---- 冻结微调协议 (严格对齐 SwinPanda: K400预训练 + 冻结前3stage, 训Stage4+STSA+CPAM+head) ----
+  oft:
+    enable: true              # OFT(Grooming粗分类) 预训练阶段开关
+    epochs: 10                # OFT 预训练 epoch 数
+    lr: 0.0002
+    head_lr_mult: 10.0
+    # OFT 4类粗标签: [background, Supported, Unsupported, Grooming, Jumping]
+    classes: ["background", "Supported", "Unsupported", "Grooming", "Jumping"]
   lp:
     enable: true              # 先训 head (冻结 backbone)
     epochs: 5
