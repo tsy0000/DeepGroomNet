@@ -254,8 +254,10 @@ def evaluate(model, loader, cfg, device, criterion=None, class_names=None):
     loss_acc = None
     tag = getattr(loader, "_eval_tag", "eval")
     n_samples = len(loader.dataset) if hasattr(loader, "dataset") else "?"
-    pbar = tqdm(loader, desc=f"[{tag}] evaluating ({n_samples} samples)", leave=False)
-    for x, y in pbar:
+    total_batches = max(1, len(loader))
+    pbar = tqdm(loader, desc=f"[{tag}] evaluating ({n_samples} samples)", leave=True)
+    seen = 0
+    for bi, (x, y) in enumerate(pbar):
         x, y = x.to(device), y.to(device)
         out = model(x)
         if isinstance(out, tuple):
@@ -273,6 +275,15 @@ def evaluate(model, loader, cfg, device, criterion=None, class_names=None):
             for k, v in ld.items():
                 loss_acc[k] += float(v) * x.size(0)
             loss_acc["_n"] += x.size(0)
+            run_loss = loss_acc.get("total", 0.0) / max(1, loss_acc["_n"])
+            pbar.set_postfix({"loss": f"{run_loss:.4f}"}, refresh=True)
+        # 每 10% 打一条详细日志 (控制台+log), 便于核对每批进度
+        seen += x.size(0)
+        if (bi + 1) % max(1, total_batches // 10) == 0 or bi == total_batches - 1:
+            rl = (loss_acc.get("total", 0.0) / max(1, loss_acc["_n"])) if loss_acc else 0.0
+            print(f"  [{tag}] 已处理 {seen}/{n_samples} 样本 (batch {bi+1}/{total_batches}) "
+                  f"avg_loss={rl:.4f}", flush=True)
+    pbar.close()
     P = np.concatenate(probs)
     Y = np.concatenate(labels)
     if loss_acc is not None:
@@ -280,6 +291,7 @@ def evaluate(model, loader, cfg, device, criterion=None, class_names=None):
         loss_dict = {k: v / n for k, v in loss_acc.items()}
     else:
         loss_dict = None
+    print(f"  [{tag}] 评估完成: {len(Y)} 样本, loss={loss_dict.get('total', float('nan')) if loss_dict else float('nan'):.4f}", flush=True)
 
     per_class = None
     if class_names is not None:
@@ -288,6 +300,12 @@ def evaluate(model, loader, cfg, device, criterion=None, class_names=None):
         pred = compute_background(pred, bg_idx=len(class_names) - 1)
         eye = (Y[:, None] == np.arange(len(class_names))).astype(int)
         per_class = binary_class_metrics(eye, pred, class_names)
+        # 详细记录: 每类最优阈值 + 样本数
+        cnt = np.bincount(Y.astype(np.int64), minlength=len(class_names))
+        thr_str = ", ".join(f"{c}={thresholds.get(c, 0.5):.3f}" for c in class_names)
+        cnt_str = ", ".join(f"{c}={int(cnt[i])}" for i, c in enumerate(class_names))
+        print(f"  [{tag}] 每类样本数: {cnt_str}", flush=True)
+        print(f"  [{tag}] 每类最优阈值: {thr_str}", flush=True)
     return P, Y, loss_dict, per_class
 
 
