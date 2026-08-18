@@ -390,8 +390,9 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
         tr_fn = np.zeros(num_classes); tr_n = 0
         pbar = tqdm(tr_ld, desc=f"[{tag}] ep{epoch+1}/{epochs} lr={lr_cur:.1e}", leave=False)
         n_batches_total = max(1, len(tr_ld))
-        for x, y in pbar:
+        for bi, (x, y) in enumerate(pbar):
             x, y = x.to(device), y.to(device)
+            grad_l2 = 0.0   # postfix 用 (非累积步显示 0)
             out = model(x)
             if isinstance(out, tuple):
                 logits, aux_logits = out
@@ -404,7 +405,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
             # 梯度累积: 每 grad_accum 步累计梯度, 最后一步才更新权重 (有效 batch = bs*accum)
             accum = int(cfg["TRAIN"].get("grad_accum", 1))
             loss = loss / accum
-            is_accum_step = ((n_steps + 1) % accum == 0) or ((n_steps + 1) == n_batches_total)
+            is_accum_step = ((bi + 1) % accum == 0) or ((bi + 1) == n_batches_total)
             loss.backward()
             if is_accum_step:
                 # ---- 梯度健康度详细记录 (每次真正更新时) ----
@@ -418,6 +419,8 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
                     g_nan += int(torch.isnan(g).sum().item()) + int(torch.isinf(g).sum().item())
                     g_cnt += g.numel()
                 grad_l2 = math.sqrt(g_l2)
+                grad_l2_sum += grad_l2; grad_max_sum += g_max; grad_nan_sum += g_nan
+                n_steps += 1
                 nn.utils.clip_grad_norm_(model.parameters(), float(cfg["TRAIN"]["grad_clip"]))
                 opt.step()
                 opt.zero_grad()
@@ -427,7 +430,6 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
             for k in tr_loss_components:
                 if k in loss_dict:
                     tr_loss_components[k] += float(loss_dict[k]) * x.size(0)
-            grad_l2_sum += grad_l2; grad_max_sum += g_max; grad_nan_sum += g_nan
             # train 多标签指标: sigmoid probs 按每类阈值 0.5 二值化 (与 val 同口径)
             tr_probs = torch.sigmoid(logits.detach()).cpu().numpy()
             tr_pred = (tr_probs >= 0.5).astype(int)
