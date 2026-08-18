@@ -123,24 +123,33 @@ class TemporalAttention(nn.Module):
 class STSA(nn.Module):
     """Spatiotemporal Shift Attention Module (论文式 11-15)。
 
-    Args:
-        channels (int): 输入通道 (与输出一致, 即插即用, 残差保持).
+    MLP1 / MLP2 采用论文引用的 MLP-mixer[23]/ResMLP[24] 结构:
+      Linear -> GELU -> Linear (两层通道混合 MLP, 用 1x1 Conv3d 实现).
+    图3 存在残差 shortcut (stage 输入直连末尾 ⊕), 故返回 input + out.
     """
 
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
-        # MLP1: C -> 3C (CM-MLP, 式11)
-        self.mlp1 = nn.Conv3d(channels, channels * 3, kernel_size=1)
+        C = channels
+        # MLP1: C -> 3C (两层: Linear->GELU->Linear, 式11)
+        self.mlp1 = nn.Sequential(
+            nn.Conv3d(C, C, kernel_size=1),
+            nn.GELU(),
+            nn.Conv3d(C, C * 3, kernel_size=1),
+        )
         # SA + TA 分支 (输入 3 路 C 通道, 输出 C)
         self.sa = SplitAttention(channels)
         self.ta = TemporalAttention(channels)
-        # MLP2: 融合输出 (式15, 保持 C)
-        self.mlp2 = nn.Conv3d(channels, channels, kernel_size=1)
-        self.act = nn.GELU()
+        # MLP2: C -> C 融合 (两层: Linear->GELU->Linear, 式15)
+        self.mlp2 = nn.Sequential(
+            nn.Conv3d(C, C, kernel_size=1),
+            nn.GELU(),
+            nn.Conv3d(C, C, kernel_size=1),
+        )
 
     def forward(self, x):
-        input = x                                           # 残差用
+        input = x                                           # 残差用 (图3 shortcut)
         chi = self.mlp1(x)                                  # (N,3C,T,H,W) 式11
         # 式12 切三路
         C = self.channels
@@ -152,6 +161,6 @@ class STSA(nn.Module):
         x2 = spatial_shift2(x2)
         # 式15: SA(χ̃) + TA(χ̃), 再 MLP2
         out = self.sa([x1, x2, x3]) + self.ta([x1, x2, x3])
-        out = self.mlp2(self.act(out))
-        # 残差
+        out = self.mlp2(out)
+        # 残差 (图3: 输入直连末尾 ⊕)
         return input + out
