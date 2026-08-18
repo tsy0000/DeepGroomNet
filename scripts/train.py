@@ -99,6 +99,7 @@ def build_model(cfg, num_classes):
         drop_path=float(m.get("drop_path", 0.2)),
         use_cpam=bool(m.get("cpam", True)),
         use_stsa=bool(m.get("stsa", True)),
+        use_checkpoint=bool(m.get("use_checkpoint", False)),
     )
     w = m.get("pretrained")
     if w and os.path.exists(w):
@@ -388,6 +389,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
         tr_tp = np.zeros(num_classes); tr_fp = np.zeros(num_classes)
         tr_fn = np.zeros(num_classes); tr_n = 0
         pbar = tqdm(tr_ld, desc=f"[{tag}] ep{epoch+1}/{epochs} lr={lr_cur:.1e}", leave=False)
+        n_batches_total = max(1, len(tr_ld))
         for x, y in pbar:
             x, y = x.to(device), y.to(device)
             out = model(x)
@@ -399,21 +401,26 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
             # AuxFocalLoss 内部: 主头 Focal + CPAM 条件自适应 (式8-10) + L2-SP
             loss, loss_dict = criterion(logits.float(), oh, aux_logits=aux_logits, model=model)
             data_loss = loss_dict.get("combined", loss).detach()
-            opt.zero_grad()
+            # 梯度累积: 每 grad_accum 步累计梯度, 最后一步才更新权重 (有效 batch = bs*accum)
+            accum = int(cfg["TRAIN"].get("grad_accum", 1))
+            loss = loss / accum
+            is_accum_step = ((n_steps + 1) % accum == 0) or ((n_steps + 1) == n_batches_total)
             loss.backward()
-            # ---- 梯度健康度详细记录 ----
-            g_l2 = 0.0; g_max = 0.0; g_nan = 0; g_cnt = 0
-            for p in model.parameters():
-                if p.grad is None:
-                    continue
-                g = p.grad.float()
-                g_l2 += (g ** 2).sum().item()
-                g_max = max(g_max, g.abs().max().item())
-                g_nan += int(torch.isnan(g).sum().item()) + int(torch.isinf(g).sum().item())
-                g_cnt += g.numel()
-            grad_l2 = math.sqrt(g_l2)
-            nn.utils.clip_grad_norm_(model.parameters(), float(cfg["TRAIN"]["grad_clip"]))
-            opt.step()
+            if is_accum_step:
+                # ---- 梯度健康度详细记录 (每次真正更新时) ----
+                g_l2 = 0.0; g_max = 0.0; g_nan = 0; g_cnt = 0
+                for p in model.parameters():
+                    if p.grad is None:
+                        continue
+                    g = p.grad.float()
+                    g_l2 += (g ** 2).sum().item()
+                    g_max = max(g_max, g.abs().max().item())
+                    g_nan += int(torch.isnan(g).sum().item()) + int(torch.isinf(g).sum().item())
+                    g_cnt += g.numel()
+                grad_l2 = math.sqrt(g_l2)
+                nn.utils.clip_grad_norm_(model.parameters(), float(cfg["TRAIN"]["grad_clip"]))
+                opt.step()
+                opt.zero_grad()
             # 实时累计 (train 也用多标签: sigmoid 阈值, 与 val 一致)
             tr_loss += data_loss.item() * x.size(0)
             n_tr += x.size(0)
@@ -662,11 +669,17 @@ def main():
         oft_root = cfg["DATA"].get("offtrain_root", "E:/tsy/downloaddatasets2")
         oft_v = build_oft_videos(oft_root, class_names=oft_classes)
         if oft_v:
-            print(f"[OFT] Grooming粗分类预训练: {len(oft_v)} 视频, 类别={oft_classes}")
+            # 按视频留出 OFT 验证集 (消除数据泄漏): 确定性取 20% 视频做 val
+            oft_v_sorted = sorted(oft_v, key=lambda v: v["video"])
+            n_oft_val = max(1, int(len(oft_v_sorted) * 0.2))
+            oft_val_v = oft_v_sorted[:n_oft_val]
+            oft_train_v = oft_v_sorted[n_oft_val:]
+            print(f"[OFT] Grooming粗分类预训练: train {len(oft_train_v)} 视频 / "
+                  f"val {len(oft_val_v)} 视频 (按视频不重叠, 无泄漏), 类别={oft_classes}")
             model.unfreeze_all()
             model.set_num_classes(len(oft_classes))
-            oft_pw, oft_cc = make_pos_weight_from_videos(oft_v, oft_classes)
-            oft_ds = FrameLevelDataset(oft_v, cfg, split="train",
+            oft_pw, oft_cc = make_pos_weight_from_videos(oft_train_v, oft_classes)
+            oft_ds = FrameLevelDataset(oft_train_v, cfg, split="train",
                                        class_names=oft_classes, frame_window=frame_window)
             oft_ld = build_loader(oft_ds, cfg, split="train", batch_size=bs,
                                   num_workers=nw, balanced=use_balanced,
@@ -680,12 +693,12 @@ def main():
             n_cpam = sum(p.numel() for p in model.cpam.parameters()) if model.cpam else 0
             n_head = sum(p.numel() for p in model.head.parameters())
             print(f"[OFT] 冻结前3stage, 训 Stage4({n_st4})+STSA({n_stsa})+CPAM({n_cpam})+head({n_head})")
-            # OFT 验证用"小分层验证集", 避免对全量 oft_ld 再跑一遍 (验证静默且耗时)
-            oft_val_ds = FrameLevelDataset(oft_v, cfg, split="val",
+            # OFT 验证用"留出视频的小分层验证集", 避免泄漏且快速
+            oft_val_ds = FrameLevelDataset(oft_val_v, cfg, split="val",
                                            class_names=oft_classes, frame_window=frame_window)
             oft_val_ld = build_loader(oft_val_ds, cfg, split="val", batch_size=bs,
                                       num_workers=nw, shuffle=False)
-            print(f"[OFT] 验证集: {len(oft_val_ds)} 样本 (小, 快速)")
+            print(f"[OFT] 验证集: {len(oft_val_ds)} 样本 (留出视频, 无泄漏)")
             oft_best = train_stage(
                 model, oft_ld, oft_val_ld, cfg, oft_crit, oft_classes, device,
                 len(oft_classes),

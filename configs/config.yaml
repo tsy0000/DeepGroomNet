@@ -58,6 +58,7 @@ MODEL:
   cpam_temporal_mixer: true   # CPAM 内 (3,1,1) Temporal Mixer
   cpam_alpha: 0.9
   cpam_beta: 0.1
+  use_checkpoint: true        # 梯度检查点: 训练时重算激活换显存 (省 40-60% 激活内存)
 
 LOSS:
   head_mode: multilabel       # 多标签 sigmoid (DeepEthogram)
@@ -75,8 +76,8 @@ LOSS:
 
 TRAIN:
   epochs: 60                  # 60 epoch + early stop (patience 12)
-  batch_size: 8
-  grad_accum: 2               # 有效 batch = 16
+  batch_size: 4               # 降显存: 每步 batch=4 (配合 checkpoint, 激活内存~减半)
+  grad_accum: 2               # 梯度累积: 有效 batch = 4*2 = 8 (与之前一致, lr 无需改)
   lr: 0.0002
   head_lr_mult: 10.0          # 分层 lr: head 用 2e-3, backbone 2e-4 (成熟迁移做法)
   weight_decay: 0.0005

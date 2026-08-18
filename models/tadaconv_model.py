@@ -47,6 +47,18 @@ def _official_block_cfg():
     )
 
 
+class _CkptBlock(nn.Module):
+    """梯度检查点包装: 训练时重算激活以省显存, 推理时直通. 仅包单个 block. """
+    def __init__(self, block):
+        super().__init__()
+        self.block = block
+
+    def forward(self, x):
+        if self.training:
+            return torch.utils.checkpoint.checkpoint(self.block, x, use_reentrant=False)
+        return self.block(x)
+
+
 def load_pretrained(model, weight_path, device="cpu"):
     """加载官方 .pyth 预训练权重 (K400/SSv2), 兼容 prefix: backbone./module.backbone./无前缀.
 
@@ -93,13 +105,14 @@ class TAdaConvModel(nn.Module):
 
     def __init__(self, num_classes=5, depths=(3, 3, 9, 3), dims=(96, 192, 384, 768),
                  t_stride=1, t_kernel_size=3, drop_path=0.2,
-                 use_cpam=True, use_stsa=True, in_chans=3):
+                 use_cpam=True, use_stsa=True, in_chans=3, use_checkpoint=False):
         super().__init__()
         self.num_classes = num_classes
         self.dims = list(dims)
         self.depths = list(depths)
         self.use_cpam = use_cpam
         self.use_stsa = use_stsa
+        self.use_checkpoint = use_checkpoint
         n_stages = len(self.dims)
         assert n_stages == 4, "TAdaConvNeXtV2 固定 4 个 stage"
 
@@ -126,12 +139,15 @@ class TAdaConvModel(nn.Module):
         dp_rates = [x.item() for x in torch.linspace(0, drop_path, sum(self.depths))]
         cur = 0
         for i in range(n_stages):
-            stage = nn.Sequential(*[
+            blocks = [
                 TAdaConvNeXtV2Block(blk_cfg, dim=dims[i], drop_path=dp_rates[cur + j],
                                     layer_scale_init_value=1e-6)
                 for j in range(self.depths[i])
-            ])
-            self.stages.append(stage)
+            ]
+            # 梯度检查点: 训练时用激活重算换显存 (eval 走原路径)
+            if use_checkpoint:
+                blocks = [_CkptBlock(b) for b in blocks]
+            self.stages.append(nn.Sequential(*blocks))
             cur += self.depths[i]
 
         # ---- 最终 norm (官方 ConvNeXt 同款) ----

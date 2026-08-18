@@ -155,20 +155,26 @@ def main():
         oft_root = cfg["DATA"].get("offtrain_root", "E:/tsy/downloaddatasets2")
         oft_v = build_oft_videos(oft_root, class_names=oft_classes)
         if oft_v:
-            print(f"[resume] OFT 预训练: {len(oft_v)} 视频, {len(oft_classes)} 类")
+            # 按视频留出 OFT 验证集 (消除数据泄漏): 确定性取 20% 视频做 val
+            oft_v_sorted = sorted(oft_v, key=lambda v: v["video"])
+            n_oft_val = max(1, int(len(oft_v_sorted) * 0.2))
+            oft_val_v = oft_v_sorted[:n_oft_val]
+            oft_train_v = oft_v_sorted[n_oft_val:]
+            print(f"[resume] OFT 预训练: train {len(oft_train_v)} 视频 / val {len(oft_val_v)} 视频 "
+                  f"(按视频不重叠)", flush=True)
             model.unfreeze_all()
             model.set_num_classes(len(oft_classes))
-            oft_pw, _ = make_pos_weight_from_videos(oft_v, oft_classes)
-            oft_ds = FrameLevelDataset(oft_v, cfg, split="train", class_names=oft_classes,
+            oft_pw, _ = make_pos_weight_from_videos(oft_train_v, oft_classes)
+            oft_ds = FrameLevelDataset(oft_train_v, cfg, split="train", class_names=oft_classes,
                                        frame_window=frame_window)
             oft_ld = build_loader(oft_ds, cfg, split="train", batch_size=bs, num_workers=nw,
                                   balanced=use_balanced, seed=seed)
-            # OFT 验证用"小分层验证集" (每类 val_samples_per_class 窗口), 避免对全量 oft_ld 再跑一遍
-            oft_val_ds = FrameLevelDataset(oft_v, cfg, split="val", class_names=oft_classes,
+            # OFT 验证用"留出视频的小分层验证集", 避免泄漏且快速
+            oft_val_ds = FrameLevelDataset(oft_val_v, cfg, split="val", class_names=oft_classes,
                                            frame_window=frame_window)
             oft_val_ld = build_loader(oft_val_ds, cfg, split="val", batch_size=bs,
                                       num_workers=nw, shuffle=False)
-            print(f"[resume] OFT 验证集: {len(oft_val_ds)} 样本 (小, 快速)", flush=True)
+            print(f"[resume] OFT 验证集: {len(oft_val_ds)} 样本 (留出视频, 无泄漏)", flush=True)
             model.freeze_first_stages(3)
             train_stage(model, oft_ld, oft_val_ld, cfg,
                         make_criterion(cfg, len(oft_classes), oft_pw, device),
