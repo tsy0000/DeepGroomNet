@@ -1,10 +1,10 @@
-﻿"""璇婃柇璁粌鍔ㄥ姏瀛︽槸鍚︽甯?(涓嶄緷璧栨渶缁堝噯纭巼)銆?
+"""璇婃柇璁粌鍔ㄥ姏瀛︽槸鍚︽甯?(涓嶄緷璧栨渶缁堝噯纭巼)銆?
 鍥炵瓟: 姊害涓嬮檷鐩稿叧鐨勬寚鏍囨槸鍚﹀湪姝ｅ父 ML 姘村钩:
   1. 鎹熷け灏哄害 vs 闅忔満鍩虹嚎鎹熷け (妯″瀷鏄惁姣?鐬庣寽"濂?
   2. 姊害鑼冩暟 (鏄惁 NaN / 鐖嗙偢 / 娑堝け)
   3. 鍙傛暟鏇存柊骞呭害 (AdamW 鏄惁鍦ㄦ甯哥Щ鍔?
   4. 璁粌 acc vs 闅忔満/甯哥被鍩虹嚎
-  5. 姣忕被姝ｆ牱鏈娴嬬巼 (鏄惁閫€鍖?
+   5. 每类正样本预测率 (是否退化)
   6. 鎹熷け鏄惁鍦ㄤ笅闄?
 鐢ㄦ硶: D:/Anaconda3/envs/deepgroomnet3/python.exe scripts/diag_train.py --steps 30 --subset-videos 6
 """
@@ -43,7 +43,7 @@ def main():
                            frame_window=fw, random_start=False, clips_per_video=40)
     pw, cc = make_pos_weight_from_videos(train_v, class_names)
     tr_ld = DataLoader(tr, batch_size=8, shuffle=True, num_workers=0)
-    print(f"device={device} | 瑙嗛={len(train_v)} | 閲囨牱鏁?epoch鈮坽len(tr)}")
+    print(f"device={device} | 视频数={len(train_v)} | 采样数/epoch={len(tr)}")
 
     # ---- 闅忔満鍩虹嚎 ----
     pi = cc / cc.sum()
@@ -60,9 +60,9 @@ def main():
         sig = np.clip(p, eps, 1 - eps)
         tl = p * (1 - ls) + 0.5 * ls   # 骞虫粦鏍囩 (瀵规鏍锋湰甯?
         tl0 = (1 - p) * (1 - ls) + 0.5 * ls  # 骞虫粦鏍囩 (瀵硅礋鏍锋湰甯?
-        bce_pos = -(tl * math.log(sig) + (1 - tl) * math.log(1 - sig))      # 鐪熷€间负姝ｇ殑甯?        bce_neg = -(tl0 * math.log(sig) + (1 - tl0) * math.log(1 - sig))    # 鐪熷€间负璐熺殑甯?        chance_loss += pwv * (p * bce_pos + (1 - p) * bce_neg)
+        bce_pos = -(tl * math.log(sig) + (1 - tl) * math.log(1 - sig))      # 真值为正的样本
     print(f"闅忔満鍩虹嚎: 甯哥被acc(閫塨ackground)={chance_acc_majority*100:.1f}% | "
-          f"鍧囧寑闅忔満acc={100/num_classes:.1f}% | 闅忔満鎹熷け鈮坽chance_loss:.3f}")
+          f"均匀随机acc={100/num_classes:.1f}% | 随机损失<={chance_loss:.3f}")
 
     # ---- 寤烘ā鍨?+ 鎹熷け ----
     model = build_model(cfg, num_classes).to(device)
@@ -113,14 +113,15 @@ def main():
             print(f"  step{step:3d} loss={loss.item():.3f} | grad_L2={grad_l2:.2e} "
                   f"grad_mean_abs={grad_abs_mean:.2e} grad_max={g_max:.2e} NaN={n_nan}")
 
-    # 姹囨€?    loss_arr = np.array(losses)
-    print(f"\n=== 姹囨€?===")
-    print(f"鎹熷け: 鍒濆={loss_arr[0]:.3f} 鏈?{loss_arr[-1]:.3f} 闄嶅箙={(loss_arr[0]-loss_arr[-1]):.3f}")
-    print(f"    (闅忔満鍩虹嚎鈮坽chance_loss:.3f})  ->  瀹為檯鎹熷け{'< 闅忔満' if loss_arr[-1] < chance_loss else '浠?= 闅忔満'}")
-    print(f"璁粌acc vs 闅忔満: 瑙佹瘡姝?甯哥被鍩虹嚎~{chance_acc_majority*100:.1f}%, 鍧囧寑~{100/num_classes:.1f}%)")
+    # 汇总
+    loss_arr = np.array(losses)
+    print(f"\n=== 汇总 ===")
+    print(f"损失: 初始={loss_arr[0]:.3f} 末={loss_arr[-1]:.3f} 降幅={(loss_arr[0]-loss_arr[-1]):.3f}")
+    print(f"    (随机基线<={chance_loss:.3f})  ->  实际损失{'<随机' if loss_arr[-1] < chance_loss else '~=随机'}")
+    print(f"训练acc vs 随机: 见每步; 常类基线~{chance_acc_majority*100:.1f}%, 均匀~{100/num_classes:.1f}%)")
     pos_rate = pos_rate / len(losses)
-    print(f"姣忕被姝ｉ娴嬬巼(>0.5): " + ", ".join(f"{c}={pr*100:.1f}%" for c, pr in zip(class_names, pos_rate)))
-    print(f"    (鑻ュ鏁扮被~100%涓旂█鏈夌被~0% 灞炴甯? 鑻ュ叏~50% 璇存槑妯″瀷楗卞拰閫€鍖?")
+    print(f"每类正预测率(>0.5): " + ", ".join(f"{c}={pr*100:.1f}%" for c, pr in zip(class_names, pos_rate)))
+    print(f"    (若多数类~100% 且稀有类~0% 属正常; 若全~50% 说明模型饱和退化)")
 
 
 if __name__ == "__main__":

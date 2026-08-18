@@ -16,6 +16,7 @@ import sys
 import torch
 import torch.nn as nn
 from types import SimpleNamespace
+from collections import OrderedDict
 
 # 确保 third_party 可导入 (官方 tadaconv 包)
 _PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,6 +45,35 @@ def _official_block_cfg():
             )
         )
     )
+
+
+def load_pretrained(model, weight_path, device="cpu"):
+    """加载官方 .pyth 预训练权重 (K400/SSv2), 兼容 prefix: backbone./module.backbone./无前缀.
+
+    只加载主干部分 (downsample_layers/stages/norm), 跳过 head/CPAM/STSA (各自独立初始化)。
+    """
+    if not os.path.exists(weight_path):
+        raise FileNotFoundError(f"pretrained weights not found: {weight_path}")
+    ckpt = torch.load(weight_path, map_location=device, weights_only=False)
+    pretrained = ckpt["model_state"] if "model_state" in ckpt else ckpt
+    if isinstance(pretrained, dict) and "state_dict" in pretrained:
+        pretrained = pretrained["state_dict"]
+
+    model_state = model.state_dict()
+    new_state = OrderedDict()
+    matched = 0
+    for k, v in pretrained.items():
+        name = k
+        for pref in ("backbone.", "module.backbone.", ""):
+            if k.startswith(pref):
+                name = k[len(pref):]
+                break
+        if name in model_state and model_state[name].shape == v.shape:
+            new_state[name] = v
+            matched += 1
+    model.load_state_dict(new_state, strict=False)
+    print(f"[TAdaPanda] loaded {matched}/{len(model_state)} params from {weight_path}")
+    return model
 
 
 class TAdaPandaModel(nn.Module):
@@ -128,6 +158,55 @@ class TAdaPandaModel(nn.Module):
             nn.init.trunc_normal_(m.weight, std=0.02)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
+
+    # ---- 与旧接口兼容的辅助方法 (scripts/train.py, diag_*, 03/04 脚本复用) ----
+    def set_head(self, num_classes, class_counts=None):
+        """替换分类头, 并用稀有类偏置初始化 (DeepEthogram rare_class_bias)."""
+        self.num_classes = num_classes
+        lin = self.head[1]  # head = Sequential(Dropout, Linear)
+        dev = lin.weight.device
+        new_lin = nn.Linear(lin.in_features, num_classes).to(dev)
+        nn.init.trunc_normal_(new_lin.weight, std=0.02)
+        if class_counts is not None:
+            cc = torch.as_tensor(class_counts, dtype=torch.float32, device=dev).clamp(min=1.0)
+            pi = cc / cc.sum()
+            b = -torch.log((1.0 - pi) / (pi + 1e-8))
+            new_lin.bias.data.copy_(b.clamp(-5.0, 5.0))
+        else:
+            nn.init.constant_(new_lin.bias, 0)
+        self.head[1] = new_lin
+
+    def freeze_backbone(self):
+        """LP 阶段: 冻结主干(含STSA/norm), 只训 head + cpam (新增模块保持可训)."""
+        for p in self.downsample_layers.parameters():
+            p.requires_grad = False
+        for p in self.stages.parameters():
+            p.requires_grad = False
+        for p in self.norm.parameters():
+            p.requires_grad = False
+        if self.stsa3 is not None:
+            for p in self.stsa3.parameters():
+                p.requires_grad = True
+        if self.stsa4 is not None:
+            for p in self.stsa4.parameters():
+                p.requires_grad = True
+        if self.cpam is not None:
+            for p in self.cpam.parameters():
+                p.requires_grad = True
+        for p in self.head.parameters():
+            p.requires_grad = True
+
+    def unfreeze_all(self):
+        for p in self.parameters():
+            p.requires_grad = True
+
+    def freeze_first_stages(self, n=3):
+        """LP-FT 阶段: 冻结前 n 个 stage (+ 对应 downsample), 训 Stage4+STSA+CPAM+head."""
+        for i in range(min(n, 4)):
+            for p in self.downsample_layers[i].parameters():
+                p.requires_grad = False
+            for p in self.stages[i].parameters():
+                p.requires_grad = False
 
     def forward_features(self, x):
         """返回 (x_normed, stage_features). stage_features 在 STSA 之前收集."""

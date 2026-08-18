@@ -1,5 +1,5 @@
-﻿"""鏋舵瀯璁捐鍚堢悊鎬ф祴璇曪細杩囨嫙鍚堟瀬灏忔牱鏈泦 (can-the-model-memorize)銆?
-鍒ゆ柇"鏋舵瀯璁捐鏄惁鍚堢悊銆佹槸鍚﹀€煎緱鑺辨椂闂村叏閲忚缁?锛?  - 鐢?2 涓棰?鏋佸皬闆?, 璁冻澶熸鏁?  - 鑻?train loss 鏄捐憲涓嬮檷 + train acc 鍗囧埌楂?鑳借浣忓皬鏍锋湰) 鈫?鏋舵瀯鍙, 璁捐鍚堢悊, 鍊煎緱璁粌
+"""鏋舵瀯璁捐鍚堢悊鎬ф祴璇曪細杩囨嫙鍚堟瀬灏忔牱鏈泦 (can-the-model-memorize)銆?
+判断"架构设计是否合理、是否值得花时间全量训练"。  - 用 2 个视频, 极小数据, 训足够步数;  - 若 train loss 显著下降 +
   - 鑻?loss 鍗′綇/acc 涓婁笉鍘?杩炲皬鏍锋湰閮借繃鎷熷悎涓嶄簡) 鈫?鏋舵瀯鏈夐棶棰? 鍏堜慨鍐嶈
 
 鍚屾椂杈撳嚭姊害鍋ュ悍搴?鏃?NaN/鐖嗙偢)銆?
@@ -48,16 +48,16 @@ def main():
 
     model = build_model(cfg, num_classes).to(device)
     model.set_head(num_classes, class_counts=cc)
-    model.unfreeze_all()   # 鍏ㄨВ鍐? 娴嬫灦鏋勬渶澶у涔犺兘鍔?    criterion = FocalLossBCE(pos_weight=pw.to(device), label_smoothing=0.05,
-                                exclusive_pairs=cfg["LOSS"].get("binary_exclusivity_pairs"),
+    model.unfreeze_all()   # 全解冻, 测架构最大学习能力
+    criterion = FocalLossBCE(pos_weight=pw.to(device), label_smoothing=0.05,
                                 exclusive_weight=float(cfg["LOSS"].get("binary_exclusivity_weight", 0.0)))
     l2sp = L2SPRegularizer(model, alpha=0, beta=0)   # 杩囨嫙鍚堟祴璇曞叧 L2-SP, 鍙湅璁板繂鑳藉姏
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.0)
 
     print("\n=== 杩囨嫙鍚堟祴璇?(鏋舵瀯鑳藉惁璁板繂灏忔牱鏈? ===")
-    # 鎶?loader 鍏ㄩ儴 batch 鍙栧嚭, 寰幆璺戞弧 args.steps 姝?    all_batches = [(x.to(device), y.to(device)) for x, y in ld]
-    print(f"batch 鏁?{len(all_batches)}, 寰幆鑷?{args.steps} 姝?)
-    best_tr_acc = 0.0
+    # 抽出 loader 全部 batch, 循环跑满 args.steps 步
+    all_batches = [(x.to(device), y.to(device)) for x, y in ld]
+    print(f"batch 数={len(all_batches)}, 循环至 {args.steps} 步")
     for step in range(args.steps):
         x, y = all_batches[step % len(all_batches)]
         model.train()
@@ -78,11 +78,11 @@ def main():
             print(f"  step{step:3d} loss={loss.item():.3f} train_acc={tr_acc*100:.1f} NaN={g_nan}")
 
     print(f"\n=== 鍒ゅ畾 ===")
-    print(f"鏈 loss={loss.item():.3f} | 宄板€?train_acc={best_tr_acc*100:.1f}%")
+    print(f"末步 loss={loss.item():.3f} | 峰值 train_acc={best_tr_acc*100:.1f}%")
     if best_tr_acc >= 80:
         print("缁撹: 鉁?鏋舵瀯鑳借繃鎷熷悎灏忔牱鏈?鈫?璁捐鍚堢悊, 鍊煎緱鍏ㄩ噺璁粌")
     elif best_tr_acc >= 50:
-        print("缁撹: 馃煛 鏋舵瀯鍙浣嗗亸寮?鈫?鍙缁? 寤鸿鍏堣皟/妫€鏌?CPAM/澶?)
+        print("结论: 结构可学但偏置, 可训练; 建议先调/检查 CPAM/头)")
     else:
         print("缁撹: 鉂?鏋舵瀯杩炲皬鏍锋湰閮借繃鎷熷悎涓嶄簡 鈫?璁捐鏈夐棶棰? 鍏堜慨鍐嶈")
 

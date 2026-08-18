@@ -1,9 +1,9 @@
-﻿"""DeepGroomNet_v3 - 浼樺寲鍣?瓒呭弬鎼滅储銆?
-鐢?optuna (鑻ユ湭瀹夎鍒欓€€鍖栦负杞婚噺闅忔満鎼滅储) 鎼滅储璁粌瓒呭弬,
+"""DeepGroomNet_v3 - 浼樺寲鍣?瓒呭弬鎼滅储銆?
+用 optuna (若未安装则退化为轻量随机搜索) 搜索训练超参,
 鐩爣 = val F1_macro (涓?train.py 鍚屼竴鍚庡鐞嗗彛寰?銆?
 鐢ㄦ硶:
   D:\\Anaconda3\\envs\\python310\\python.exe scripts/03_search_hyperparams.py --trials 20
-  鍙€? --config configs/config.yaml --subset-videos 12
+  可选: --config configs/config.yaml --subset-videos 12
 """
 import os
 import sys
@@ -54,8 +54,8 @@ def run_trial(cfg, params, device):
     num_classes = len(class_names)
     frame_window = int(cfg["CLIP"]["num_input_frames"])
     bs = int(params["batch_size"])
-    nw = 0  # 鎼滅储闃舵鐢?0 worker 鐪佸唴瀛?    tr_ld, va_ld, pw = build_dataloaders(cfg, class_names, frame_window,
-                                         int(cfg["TRAIN"]["search"].get("subset_videos", 12)),
+    nw = 0  # 搜索阶段用 0 worker 省内存
+    tr_ld, va_ld, pw = build_dataloaders(cfg, class_names, frame_window,
                                          bs, nw)
     model = build_model(cfg, num_classes).to(device)
     criterion = FocalLossBCE(

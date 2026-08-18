@@ -32,10 +32,15 @@ class ConditionalLoss(nn.Module):
         self.eps = eps
 
     def forward(self, lce, lcpam):
-        """lce, lcpam: 标量 loss (可 detach). 返回加权组合标量."""
+        """lce, lcpam: 标量 loss. 权重用 detach 值计算 (式9/10), 梯度只经损失项回传.
+
+        论文式8-10: 权重 W_CE/W_CPAM 由 L_CE/L_CPAM 计算, 应视为常数 (stop-gradient),
+        梯度仅通过 L_CE/L_CPAM 本身回传, 避免权重额外引入梯度 (与论文公式一致).
+        """
         if lcpam < lce:
-            w_ce = self.alpha * lce + (1 - self.alpha) * (lce / (lce + lcpam + self.eps))
-            w_cpam = self.alpha * lcpam + (1 - self.alpha) * (lcpam / (lce + lcpam + self.eps))
+            d_ce = lce.detach(); d_cp = lcpam.detach()
+            w_ce = self.alpha * d_ce + (1 - self.alpha) * (d_ce / (d_ce + d_cp + self.eps))
+            w_cpam = self.alpha * d_cp + (1 - self.alpha) * (d_cp / (d_ce + d_cp + self.eps))
             return w_ce * lce + w_cpam * lcpam
         else:
             return lce + self.beta * lcpam
@@ -133,15 +138,8 @@ class TadaPandaLoss(nn.Module):
         if aux_logits is not None:
             lcpam = self.focal(aux_logits.float(), tgt)
             loss_dict["L_CPAM"] = lcpam.detach()
-            combined = self.conditional(lce.detach(), lcpam.detach())
-            # 但需保持梯度: 用式8-10 组合原始带梯度的 lce/lcpam
-            if lcpam.detach() < lce.detach():
-                alpha = self.conditional.alpha
-                w_ce = alpha * lce.detach() + (1 - alpha) * (lce.detach() / (lce.detach() + lcpam.detach() + 1e-8))
-                w_cpam = alpha * lcpam.detach() + (1 - alpha) * (lcpam.detach() / (lce.detach() + lcpam.detach() + 1e-8))
-                data_loss = w_ce * lce + w_cpam * lcpam
-            else:
-                data_loss = lce + self.conditional.beta * lcpam
+            # 式8-10 条件自适应加权 (ConditionalLoss 内部对权重 detach, 梯度仅经损失项)
+            data_loss = self.conditional(lce, lcpam)
             loss_dict["combined"] = data_loss.detach()
         else:
             data_loss = lce

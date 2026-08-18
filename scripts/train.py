@@ -1,4 +1,4 @@
-﻿"""DeepGroomNet_v3 - 璁粌涓昏剼鏈€?
+"""DeepGroomNet_v3 - 训练主脚本。
 瀵归綈 DeepEthogram (甯х骇琛屼负鍒嗙被) + TAdaConv 瀹樻柟璁粌閰嶇疆:
   - 浼樺寲鍣? AdamW, lr=2.5e-4, weight_decay 灏?(TAdaConv 瀹樻柟)
   - 鍒嗗眰 lr: head/鏂板眰 lr脳10 (TAdaConv HEAD_LRMULT=10, 鍥哄畾鍊嶆暟闈炰腑閫旀敼)
@@ -25,8 +25,8 @@ import torch.nn as nn
 import yaml
 
 from data.dataset import FrameLevelDataset, make_pos_weight_from_videos
-from models.backbones.tadaconvnext import TAdaConvNeXtV2, load_pretrained
-from losses.classification import FocalLossBCE, L2SPRegularizer
+from models.tadapanda_model import TAdaPandaModel, load_pretrained
+from losses.tadapanda import TadaPandaLoss
 from postprocess.thresholds import (evaluate_thresholds, threshold_predict,
                                     compute_background, min_bout_per_behavior,
                                     binary_metrics, smooth_probabilities,
@@ -36,7 +36,7 @@ from tqdm import tqdm
 
 
 def binary_class_metrics(eye, pred, class_names):
-    """閫愮被浜屽€兼寚鏍?(eye/pred 鍧囦负 [N,K] 0/1)銆傝繑鍥?per_class: acc/precision/recall/f1銆?""
+    """逐类二值指标 (eye/pred 均为 [N,K] 0/1)。返回 per_class: acc/precision/recall/f1。"""
     per_class = {}
     N = max(1, eye.shape[0])
     for i, c in enumerate(class_names):
@@ -58,8 +58,8 @@ def f1_macro_from(per_class, class_names):
 
 
 def macro_auroc(P, Y, class_names):
-    """闃堝€兼棤鍏崇殑 AUROC (杩佺Щ鑷?DeepEthogram metrics.roc_auc / sklearn)銆?
-    鐢ㄤ簬鏃╁仠/閫夋ā鍨? 閬垮厤鍦ㄦ瀬灏?val + 绋€鏈夌被涓婂仛闃堝€肩綉鏍兼悳绱㈠鑷?F1 鎶栧姩銆?    P: [N,K] 姒傜巼; Y: [N] int 鏍囩銆?    """
+    """阈值无关的 AUROC (迁移自 DeepEthogram metrics.roc_auc / sklearn)。
+    用于早停/选模型, 避免在极小 val + 稀有类上做阈值网格搜索导致 F1 抖动。    P: [N,K] 概率; Y: [N] int 标签。    """
     from sklearn.metrics import roc_auc_score
     K = P.shape[1]
     eye = (Y[:, None] == np.arange(K)).astype(int)
@@ -75,7 +75,7 @@ def macro_auroc(P, Y, class_names):
 
 
 def macro_auprc(P, Y, class_names):
-    """闃堝€兼棤鍏崇殑 AUPRC (瀵规瀬涓嶅钩琛℃洿绋?銆?""
+    """阈值无关的 AUPRC (对极不平衡更稳)。"""
     from sklearn.metrics import average_precision_score
     K = P.shape[1]
     eye = (Y[:, None] == np.arange(K)).astype(int)
@@ -91,16 +91,17 @@ def macro_auprc(P, Y, class_names):
 
 
 def build_model(cfg, num_classes):
-    mc = type("MC", (), {
-        "num_classes": num_classes,
-        "cpam": cfg["MODEL"].get("cpam", True),
-        "cpam_beta": cfg["MODEL"].get("cpam_beta", 0.1),
-        "cpam_alpha": cfg["MODEL"].get("cpam_alpha", 0.9),
-        "dropout": 0.0,
-    })
-    model = TAdaConvNeXtV2(mc)
-    load_pretrained(model, cfg["MODEL"]["pretrained"])
-    model.set_head(num_classes)
+    m = cfg["MODEL"]
+    model = TAdaPandaModel(
+        num_classes=num_classes,
+        t_stride=1,                       # T=32
+        drop_path=float(m.get("drop_path", 0.2)),
+        use_cpam=bool(m.get("cpam", True)),
+        use_stsa=bool(m.get("stsa", True)),
+    )
+    w = m.get("pretrained")
+    if w and os.path.exists(w):
+        load_pretrained(model, w)
     return model
 
 
@@ -154,7 +155,9 @@ def make_optimizer(model, base_lr, head_mult, weight_decay):
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        (head_groups if name.startswith("head") else base_groups).append(p)
+        # head/cpam/stsa 为新增/头部模块, 用高 lr (与 Lightning 分层一致)
+        (head_groups if any(k in name for k in ("head", "cpam", "stsa"))
+         else base_groups).append(p)
     groups = []
     if base_groups:
         groups.append({"params": base_groups, "lr": base_lr,
@@ -165,17 +168,17 @@ def make_optimizer(model, base_lr, head_mult, weight_decay):
     return torch.optim.AdamW(groups)
 
 
-def train_stage(model, tr_ld, va_ld, cfg, criterion, l2sp, class_names, device,
+def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
                 num_classes, epochs, base_lr, head_mult, warmup, patience,
                 ckpt_dir, metrics_csv, tag):
-    """璺戜竴涓缁冮樁娈?(LP 鎴?LP-FT)銆傝繑鍥炶闃舵鏈€浼?val F1_macro銆?""
+    """跑一个训练阶段 (LP 或 LP-FT)。返回该阶段最优 val F1_macro。"""
     opt = make_optimizer(model, base_lr, head_mult,
                          float(cfg["TRAIN"].get("weight_decay", 0.02)))
     best_f1, best_epoch, bad = 0.0, -1, 0
     for epoch in range(epochs):
         model.train()
         lr_cur = cosine_with_warmup(epoch, epochs, warmup, base_lr)
-        # LP 闃舵: head 鏄敮涓€鍙缁?(gi=0), 涓嶄箻 head_mult; LP-FT: head 缁勪箻 head_mult
+        # LP 阶段: head 是唯一可训 (gi=0), 不乘 head_mult; LP-FT: head 组乘 head_mult
         for gi, g in enumerate(opt.param_groups):
             g["lr"] = lr_cur * (head_mult if gi >= 1 else 1.0)
 
@@ -193,20 +196,9 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, l2sp, class_names, device,
             else:
                 logits, aux_logits = out, None
             oh = nn.functional.one_hot(y, num_classes=num_classes).float()
-            data_loss = criterion(logits.float(), oh)
-            if aux_logits is not None:
-                # CPAM 涓ユ牸鎸夊師鏂囧紡8-10: 鏉′欢鑷€傚簲鍔犳潈 L_CE 涓?L_CPAM (伪=0.9, 尾=0.1)
-                lcpam_loss = criterion(aux_logits.float(), oh)
-                if lcpam_loss.detach() < data_loss.detach():
-                    lce, lc = data_loss.detach(), lcpam_loss.detach()
-                    alpha = float(cfg["MODEL"].get("cpam_alpha", 0.9))
-                    w_ce = alpha * lce + (1 - alpha) * (lce / (lce + lc + 1e-8))
-                    w_cpam = alpha * lc + (1 - alpha) * (lc / (lce + lc + 1e-8))
-                    data_loss = w_ce * data_loss + w_cpam * lcpam_loss
-                else:
-                    beta = float(cfg["MODEL"].get("cpam_beta", 0.1))
-                    data_loss = data_loss + beta * lcpam_loss
-            loss = data_loss + l2sp(model)
+            # TadaPandaLoss 内部: 主头 Focal + CPAM 条件自适应 (式8-10) + L2-SP
+            loss, loss_dict = criterion(logits.float(), oh, aux_logits=aux_logits, model=model)
+            data_loss = loss_dict.get("combined", loss).detach()
             opt.zero_grad()
             loss.backward()
             # ---- 姊害鍋ュ悍搴﹁缁嗚褰?----
@@ -222,7 +214,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, l2sp, class_names, device,
             grad_l2 = math.sqrt(g_l2)
             nn.utils.clip_grad_norm_(model.parameters(), float(cfg["TRAIN"]["grad_clip"]))
             opt.step()
-            # 瀹炴椂绱鎸囨爣 (鍗曟爣绛?argmax vs 鐪熷€?
+            # 实时累计指标 (单标签 argmax vs 真值)
             tr_loss += data_loss.item() * x.size(0)
             n_tr += x.size(0)
             grad_l2_sum += grad_l2; grad_max_sum += g_max; grad_nan_sum += g_nan
@@ -245,11 +237,12 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, l2sp, class_names, device,
         tr_loss /= max(n_tr, 1)
         tr_acc = tr_tp.sum() / max(1, tr_n)
         tr_f1s = np.where(tr_tp + tr_fn > 0, 2 * tr_tp / (2 * tr_tp + tr_fp + tr_fn + 1e-9), 0.0)
-        # 姣?epoch 姊害姹囨€?        grad_epoch = {"grad_l2": grad_l2_sum / max(1, n_steps),
+        # 每 epoch 梯度汇总
+        grad_epoch = {"grad_l2": grad_l2_sum / max(1, n_steps),
                       "grad_max": grad_max_sum / max(1, n_steps),
                       "grad_nan": int(grad_nan_sum)}
 
-        # val 璇勪及 (DeepEthogram: 闃堝€肩綉鏍?+ min_bout; 鍙姞鏃跺簭骞虫粦 + bout 缁熻)
+        # val 评估 (DeepEthogram: 阈值网格 + min_bout; 可加时序平滑 + bout 统计)
         P, Y = evaluate(model, va_ld, cfg, device)
         if cfg["POSTPROCESS"].get("temporal_smooth", False):
             P = smooth_probabilities(P, int(cfg["POSTPROCESS"].get("smooth_window", 3)))
@@ -263,7 +256,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, l2sp, class_names, device,
         eye = (Y[:, None] == np.arange(num_classes)).astype(int)
         per_class = binary_class_metrics(eye, pred, class_names)
         val_f1m = f1_macro_from(per_class, class_names)
-        # 闃堝€兼棤鍏崇殑鏃╁仠/閫夋ā鍨嬫寚鏍?(DeepEthogram 鐢?AUROC; 閬垮厤闃堝€肩綉鏍兼姈鍔?
+        # 阈值无关的早停/选模型指标 (DeepEthogram 用 AUROC; 避免阈值网格抖动)
         # select_metric: auroc / auprc / f1
         sel = cfg["TRAIN"].get("select_metric", "auroc")
         if sel == "auprc":
@@ -274,7 +267,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, l2sp, class_names, device,
             sel_metric = macro_auroc(P, Y, class_names)
         save_metrics(metrics_csv, epoch, class_names, per_class, val_f1m, grad_epoch)
 
-        # ---- 姣?epoch 缁撴潫鍚庨€愮被 acc/f1/recall/precision + 姊害姹囨€?----
+        # ---- 每 epoch 结束后逐类 acc/f1/recall/precision + 梯度汇总 ----
         print(f"\n[{tag}] ep{epoch+1}/{epochs} | TRAIN loss={tr_loss:.3f} acc={tr_acc*100:.1f} "
               f"f1_macro={tr_f1s.mean()*100:.1f} | VAL f1_macro={val_f1m:.2f} "
               f"AUROC={macro_auroc(P, Y, class_names):.3f} | "
@@ -359,18 +352,17 @@ def main():
 
     # 妯″瀷 + 鎹熷け
     model = build_model(cfg, num_classes).to(device)
-    # 绋€鏈夌被鍋忕疆鍒濆鍖? 鐢ㄨ缁冪被鍒崰姣?(DeepEthogram rare_class_bias, 缂撹В鏃╂湡鍏ㄥ垽姝?
+    # 稀有类偏置初始化, 用训练类别占比 (DeepEthogram rare_class_bias, 缓解早期全判负)
     model.set_head(num_classes, class_counts=cc)
-    criterion = FocalLossBCE(
+    criterion = TadaPandaLoss(
+        num_classes=num_classes,
         pos_weight=pw.to(device),
-        gamma=float(cfg["LOSS"].get("binary_gamma", 0.0)),
+        gamma=float(cfg["LOSS"].get("binary_gamma", 0.5)),
+        alpha=float(cfg["MODEL"].get("cpam_alpha", 0.9)),
+        beta=float(cfg["MODEL"].get("cpam_beta", 0.1)),
+        l2sp_weight=float(cfg["TRAIN"].get("l2sp_weight", 0.0)),
         label_smoothing=float(cfg["LOSS"].get("binary_label_smoothing", 0.05)),
-        exclusive_pairs=cfg["LOSS"].get("binary_exclusivity_pairs"),
-        exclusive_weight=float(cfg["LOSS"].get("binary_exclusivity_weight", 0.0)),
     )
-    # L2-SP 姝ｅ垯 (鍙棰勮缁冨眰, 伪)
-    from models.backbones.tadaconvnext import load_pretrained as _lp
-    l2sp = L2SPRegularizer(model, alpha=1e-5, beta=1e-3)
 
     bs = int(cfg["TRAIN"]["batch_size"])
     nw = int(cfg["TRAIN"]["num_workers"])
@@ -393,24 +385,25 @@ def main():
     lpft = cfg["TRAIN"].get("lpft", {})
     do_lp = bool(lp.get("enable", False))
     if do_lp:
-        # 闃舵1: Linear Probe 鈥?鍐荤粨 backbone, 鍙 head (head_lr_mult=1)
+        # 阶段1: Linear Probe -- 冻结主干(含STSA), 只训 head + cpam (新增模块保持可训)
         model.freeze_backbone()
         n_head_params = sum(p.numel() for p in model.head.parameters())
-        print(f"[LP] 鍐荤粨 backbone, 鍙 head ({n_head_params} 鍙傛暟)")
+        n_cpam_params = sum(p.numel() for p in model.cpam.parameters())
+        print(f"[LP] 冻结主干, 只训 head ({n_head_params}) + cpam ({n_cpam_params}) 参数")
         train_stage(
-            model, tr_ld, va_ld, cfg, criterion, l2sp, class_names, device,
+            model, tr_ld, va_ld, cfg, criterion, class_names, device,
             num_classes,
             epochs=args.lp_epochs or int(lp.get("epochs", 5)),
             base_lr=float(lp.get("lr", 5e-4)), head_mult=1.0,
             warmup=min(warmup, int(lp.get("epochs", 5))), patience=patience,
             ckpt_dir=ckpt_dir, metrics_csv=metrics_csv, tag="lp")
 
-    # 闃舵2: LP-FT 鈥?瑙ｅ喕 backbone, 灏?lr 寰皟 (head_lr_mult=10)
-    if do_lp:
-        model.unfreeze_all()
+    # 阶段2: LP-FT -- 冻结前 3 个 stage, 解冻 Stage4 + STSA + CPAM + head (论文: 训 Stage4+新增模块)
     ft_epochs = args.epochs or int(lpft.get("epochs", int(cfg["TRAIN"]["epochs"])))
+    if do_lp:
+        model.freeze_first_stages(3)   # 冻结 Stage1-3, 保持 Stage4+STSA+CPAM+head 可训
     best_f1 = train_stage(
-        model, tr_ld, va_ld, cfg, criterion, l2sp, class_names, device,
+        model, tr_ld, va_ld, cfg, criterion, class_names, device,
         num_classes,
         epochs=ft_epochs,
         base_lr=float(lpft.get("lr", float(cfg["TRAIN"]["lr"]))),
@@ -424,7 +417,7 @@ def main():
     # ---- 璁粌缁撴潫鍚? 鐢ㄦ渶浣?LP-FT 鏉冮噸鍦ㄧ嫭绔?test 闆嗚瘎浼?----
     test_v = split.get("test") or []
     if test_v:
-        print(f"\n[TEST] 鍦?test 闆?{len(test_v)} 瑙嗛)璇勪及鏈€浣虫ā鍨?..")
+        print(f"\n[TEST] 在 test 集 ({len(test_v)} 视频) 评估最佳模型..")
         test_ds = FrameLevelDataset(test_v, cfg, split="val",
                                     class_names=class_names, frame_window=frame_window)
         test_ld = DataLoader(test_ds, batch_size=bs, shuffle=False,
