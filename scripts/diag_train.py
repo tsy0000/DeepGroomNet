@@ -1,11 +1,11 @@
-"""璇婃柇璁粌鍔ㄥ姏瀛︽槸鍚︽甯?(涓嶄緷璧栨渶缁堝噯纭巼)銆?
-鍥炵瓟: 姊害涓嬮檷鐩稿叧鐨勬寚鏍囨槸鍚﹀湪姝ｅ父 ML 姘村钩:
-  1. 鎹熷け灏哄害 vs 闅忔満鍩虹嚎鎹熷け (妯″瀷鏄惁姣?鐬庣寽"濂?
-  2. 姊害鑼冩暟 (鏄惁 NaN / 鐖嗙偢 / 娑堝け)
-  3. 鍙傛暟鏇存柊骞呭害 (AdamW 鏄惁鍦ㄦ甯哥Щ鍔?
-  4. 璁粌 acc vs 闅忔満/甯哥被鍩虹嚎
+"""诊断训练动力学是否正常 (不依赖最终准确率)。
+回答: 梯度下降相关的指标是否在正常 ML 水平:
+  1. 损失尺度 vs 随机基线损失 (模型是否比"瞎猜"好
+  2. 梯度范数 (是否 NaN / 爆炸 / 消失)
+  3. 参数更新幅度 (AdamW 是否在正常移动)
+  4. 训练 acc vs 随机/常类基线
    5. 每类正样本预测率 (是否退化)
-  6. 鎹熷け鏄惁鍦ㄤ笅闄?
+  6. 损失是否在下降
 鐢ㄦ硶: D:/Anaconda3/envs/deepgroomnet3/python.exe scripts/diag_train.py --steps 30 --subset-videos 6
 """
 import os, sys, json, argparse, math
@@ -47,24 +47,24 @@ def main():
 
     # ---- 闅忔満鍩虹嚎 ----
     pi = cc / cc.sum()
-    print("\n=== 绫诲埆鍏堥獙 ===")
+    print("\n=== 类别先验 ===")
     for i, c in enumerate(class_names):
         print(f"  {c}: prior={pi[i]*100:.2f}%  pos_weight={pw[i]:.2f}")
     chance_acc_majority = float(pi.max())
     chance_loss = 0.0
     eps = 1e-7
-    # 闅忔満妯″瀷(姣忕被 sigmoid=prior) 鐨勫姞鏉?BCE 鏈熸湜鎹熷け(甯?label smoothing)
+    # 随机模型(每类 sigmoid=prior) 的加权 BCE 期望损失(含 label smoothing)
     ls = float(cfg["LOSS"].get("binary_label_smoothing", 0.05)) * 2
     for c in range(num_classes):
         p = float(pi[c]); pwv = float(pw[c])
         sig = np.clip(p, eps, 1 - eps)
-        tl = p * (1 - ls) + 0.5 * ls   # 骞虫粦鏍囩 (瀵规鏍锋湰甯?
-        tl0 = (1 - p) * (1 - ls) + 0.5 * ls  # 骞虫粦鏍囩 (瀵硅礋鏍锋湰甯?
+        tl = p * (1 - ls) + 0.5 * ls   # 平滑标签 (对正样本)
+        tl0 = (1 - p) * (1 - ls) + 0.5 * ls  # 平滑标签 (对负样本)
         bce_pos = -(tl * math.log(sig) + (1 - tl) * math.log(1 - sig))      # 真值为正的样本
-    print(f"闅忔満鍩虹嚎: 甯哥被acc(閫塨ackground)={chance_acc_majority*100:.1f}% | "
+    print(f"随机基线: 常类acc(除background)={chance_acc_majority*100:.1f}% | "
           f"均匀随机acc={100/num_classes:.1f}% | 随机损失<={chance_loss:.3f}")
 
-    # ---- 寤烘ā鍨?+ 鎹熷け ----
+    # ---- 建模型 + 损失 ----
     model = build_model(cfg, num_classes).to(device)
     model.set_head(num_classes, class_counts=cc)
     model.freeze_backbone()
@@ -74,11 +74,11 @@ def main():
                                 exclusive_pairs=cfg["LOSS"].get("binary_exclusivity_pairs"),
                                 exclusive_weight=float(cfg["LOSS"].get("binary_exclusivity_weight", 0.0)))
 
-    print("\n=== 鍓嶅悜 + 姊害璇婃柇 ===")
+    print("\n=== 前向 + 梯度诊断 ===")
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"鍙缁冨弬鏁?LP): {n_params}")
+    print(f"可训练参数(LP): {n_params}")
     losses = []
-    pos_rate = np.zeros(num_classes)   # 姣忕被姝ｉ娴嬬巼
+    pos_rate = np.zeros(num_classes)   # 每类正预测率
     first_xy = None
     for step, (x, y) in enumerate(tr_ld):
         if step >= args.steps: break
@@ -88,7 +88,7 @@ def main():
         oh = nn.functional.one_hot(y, num_classes=num_classes).float()
         loss = criterion(logits.float(), oh)
         opt.zero_grad(); loss.backward()
-        # 姊害璇婃柇
+        # 梯度诊断
         g_norm2 = 0.0; g_abs_sum = 0.0; g_max = 0.0; n_nan = 0; n_par = 0
         for p in model.parameters():
             if p.grad is None: continue
@@ -103,7 +103,7 @@ def main():
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         losses.append(loss.item())
-        # 棰勬祴鍒嗗竷
+        # 预测分布
         with torch.no_grad():
             pr = torch.sigmoid(logits.float()).cpu().numpy()
             pos_rate += (pr > 0.5).sum(0)

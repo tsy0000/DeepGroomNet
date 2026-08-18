@@ -1,12 +1,12 @@
 """DeepGroomNet_v3 - 训练主脚本。
-瀵归綈 DeepEthogram (甯х骇琛屼负鍒嗙被) + TAdaConv 瀹樻柟璁粌閰嶇疆:
-  - 浼樺寲鍣? AdamW, lr=2.5e-4, weight_decay 灏?(TAdaConv 瀹樻柟)
-  - 鍒嗗眰 lr: head/鏂板眰 lr脳10 (TAdaConv HEAD_LRMULT=10, 鍥哄畾鍊嶆暟闈炰腑閫旀敼)
+对齐 DeepEthogram (帧级行为分类) + TAdaConv 官方训练配置:
+  - 优化器: AdamW, lr=2.5e-4, weight_decay 小 (TAdaConv 官方)
+  - 分层 lr: head/新层 lr*10 (TAdaConv HEAD_LRMULT=10, 固定倍数非中途改)
   - cosine lr + warmup (TAdaConv 瀹樻柟 8ep warmup)
-  - 鎹熷け: pos_weight BCE + label smoothing + L2-SP (loss 鍐?
-  - 鏃犻厤棰濋噰鏍峰櫒 (绫诲埆涓嶅钩琛￠潬 pos_weight)
-  - 鏃犳瘡 epoch 鍥炴粴 (鏉冮噸鍗曡皟绱Н, 鏍囧噯鍋氭硶)
-  - 鎸夊皬榧犲垝鍒? 瀹炴椂甯х骇瑙ｇ爜
+  - 损失: pos_weight BCE + label smoothing + L2-SP (loss 内)
+  - 无配额采样器 (类别不平衡靠 pos_weight)
+  - 无每 epoch 回滚 (权重单调累积, 标准做法)
+  - 按小鼠划分, 实时帧级解码
 """
 import os
 import sys
@@ -182,7 +182,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
         for gi, g in enumerate(opt.param_groups):
             g["lr"] = lr_cur * (head_mult if gi >= 1 else 1.0)
 
-        # ---- 璁粌 (tqdm 瀹炴椂鏄剧ず loss/acc/f1/grad) ----
+        # ---- 训练 (tqdm 实时显示 loss/acc/f1/grad) ----
         tr_loss, n_tr = 0.0, 0
         grad_l2_sum = 0.0; grad_max_sum = 0.0; grad_nan_sum = 0; n_steps = 0
         tr_tp = np.zeros(num_classes); tr_fp = np.zeros(num_classes)
@@ -201,7 +201,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
             data_loss = loss_dict.get("combined", loss).detach()
             opt.zero_grad()
             loss.backward()
-            # ---- 姊害鍋ュ悍搴﹁缁嗚褰?----
+            # ---- 梯度健康度详细记录 ----
             g_l2 = 0.0; g_max = 0.0; g_nan = 0; g_cnt = 0
             for p in model.parameters():
                 if p.grad is None:
@@ -302,29 +302,38 @@ def main():
     ap.add_argument("--lp-epochs", type=int, default=None)
     ap.add_argument("--subset-videos", type=int, default=None)
     ap.add_argument("--log-file", default=None,
-                    help="灏嗘帶鍒跺彴杈撳嚭鍚屾椂鍐欏叆璇ユ枃浠?榛樿 outputs/logs/train_<鏃堕棿>.log)")
+                    help="将控制台输出同时写入该文件 (默认 outputs/logs/train_<时间>.log)")
     args = ap.parse_args()
 
-    # 鑷姩钀界洏鏃ュ織 (PyCharm 杩愯鏃朵篃鑳界敓鎴? 渚夸簬鍚庢湡浼樺寲)
+    # 自动落盘日志 (PyCharm 运行时也能生成, 便于后期优化)
     import time as _t, io as _io
     log_path = args.log_file or os.path.join(
         ROOT, "outputs", "logs", f"train_{_t.strftime('%Y%m%d_%H%M%S')}.log")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     _logf = open(log_path, "a", encoding="utf-8")
     _orig_stdout, _orig_stderr = sys.stdout, sys.stderr
-    class _Tee(_io.TextIOWrapper):
+    class _Tee:
+        """同时写控制台 + 日志文件。不依赖 .buffer, 兼容 IDE 运行控制台。"""
         def __init__(self, orig):
-            super().__init__(orig.buffer, encoding=orig.encoding or "utf-8", line_buffering=True)
             self._orig = orig
         def write(self, s):
-            try: _logf.write(s); _logf.flush()
-            except Exception: pass
-            return self._orig.write(s)
+            try:
+                _logf.write(s); _logf.flush()
+            except Exception:
+                pass
+            try:
+                return self._orig.write(s)
+            except Exception:
+                return len(s)
         def flush(self):
-            self._orig.flush()
+            try: self._orig.flush()
+            except Exception: pass
+        def isatty(self):
+            try: return self._orig.isatty()
+            except Exception: return False
     sys.stdout = _Tee(_orig_stdout)
     sys.stderr = _Tee(_orig_stderr)
-    print(f"[log] 鎺у埗鍙拌緭鍑哄凡鍐欏叆: {log_path}")
+    print(f"[log] 控制台输出已写入: {log_path}")
 
     cfg = yaml.safe_load(open(args.config, encoding="utf-8"))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -332,25 +341,25 @@ def main():
     num_classes = len(class_names)
     frame_window = int(cfg["CLIP"]["num_input_frames"])
 
-    # 鏁版嵁鍒掑垎 (鎸夊皬榧? 宸茬敱 02 鑴氭湰鐢熸垚)
+    # 数据划分 (按小鼠, 已由 02 脚本生成)
     split = json.load(open(os.path.join(cfg["DATA"]["meta_root"], "split.json")))
     train_v = split["train"]
     val_v = split["val"]
     if args.subset_videos:
         train_v = train_v[:args.subset_videos]
         val_v = val_v[:max(1, args.subset_videos // 4)]
-    print(f"train {len(train_v)} 瑙嗛 / val {len(val_v)} 瑙嗛")
+    print(f"train {len(train_v)} 视频 / val {len(val_v)} 视频")
 
-    # pos_weight (甯х骇绫诲埆涓嶅钩琛?
+    # pos_weight (帧级类别不平衡)
     train_ds = FrameLevelDataset(train_v, cfg, split="train",
                                  class_names=class_names, frame_window=frame_window)
     val_ds = FrameLevelDataset(val_v, cfg, split="val",
                                class_names=class_names, frame_window=frame_window)
     pw, cc = make_pos_weight_from_videos(train_v, class_names)
-    print("绫诲埆鍒嗗竷:", dict(zip(class_names, [int(x) for x in cc])))
+    print("类别分布:", dict(zip(class_names, [int(x) for x in cc])))
     print("pos_weight:", [round(x, 2) for x in pw.tolist()])
 
-    # 妯″瀷 + 鎹熷け
+    # 模型 + 损失
     model = build_model(cfg, num_classes).to(device)
     # 稀有类偏置初始化, 用训练类别占比 (DeepEthogram rare_class_bias, 缓解早期全判负)
     model.set_head(num_classes, class_counts=cc)
@@ -380,7 +389,7 @@ def main():
     metrics_csv = os.path.join(metric_dir, "train_metrics.csv")
     weight_decay = float(cfg["TRAIN"].get("weight_decay", 0.02))
 
-    # ---- 璁粌绛栫暐: VideoGLUE/LP-FT 涓ゆ寮?(linear probe -> LP-FT) ----
+    # ---- 训练策略: VideoGLUE/LP-FT 两段式 (linear probe -> LP-FT) ----
     lp = cfg["TRAIN"].get("lp", {})
     lpft = cfg["TRAIN"].get("lpft", {})
     do_lp = bool(lp.get("enable", False))
@@ -414,7 +423,7 @@ def main():
     print(f"\n瀹屾垚, best val f1_macro={best_f1:.2f}")
     print(f"鎸囨爣 -> {metrics_csv}")
 
-    # ---- 璁粌缁撴潫鍚? 鐢ㄦ渶浣?LP-FT 鏉冮噸鍦ㄧ嫭绔?test 闆嗚瘎浼?----
+    # ---- 训练结束后, 用最佳 LP-FT 权重在独立 test 集评估 ----
     test_v = split.get("test") or []
     if test_v:
         print(f"\n[TEST] 在 test 集 ({len(test_v)} 视频) 评估最佳模型..")
@@ -448,7 +457,7 @@ def main():
                   f"{pc['recall']:>7.1f}%{pc['precision']:>9.1f}%")
         save_metrics(os.path.join(metric_dir, "test_metrics.csv"), 0, class_names, tpc, tf1)
     else:
-        print("\n[TEST] 鏃?test 闆?(split.json 涓?test 涓虹┖)")
+        print("\n[TEST] 无 test 集 (split.json 中 test 为空)")
 
 
 if __name__ == "__main__":

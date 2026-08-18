@@ -1,8 +1,8 @@
-"""鏋舵瀯璁捐鍚堢悊鎬ф祴璇曪細杩囨嫙鍚堟瀬灏忔牱鏈泦 (can-the-model-memorize)銆?
+"""架构设计合理性测试: 过拟合极小样本集 (can-the-model-memorize)。
 判断"架构设计是否合理、是否值得花时间全量训练"。  - 用 2 个视频, 极小数据, 训足够步数;  - 若 train loss 显著下降 +
-  - 鑻?loss 鍗′綇/acc 涓婁笉鍘?杩炲皬鏍锋湰閮借繃鎷熷悎涓嶄簡) 鈫?鏋舵瀯鏈夐棶棰? 鍏堜慨鍐嶈
+  - 若 loss 卡住/acc 上不去 (连小样本都过拟合不了) -> 结构有问题, 先修再训
 
-鍚屾椂杈撳嚭姊害鍋ュ悍搴?鏃?NaN/鐖嗙偢)銆?
+同时输出梯度健康度 (无 NaN/爆炸)。
 鐢ㄦ硶:
   D:/Anaconda3/envs/deepgroomnet3/python.exe scripts/diag_overfit.py \
       --subset-videos 2 --clip-per-video 40 --steps 120
@@ -44,17 +44,17 @@ def main():
                            frame_window=fw, random_start=False, clips_per_video=args.clip_per_video)
     ld = DataLoader(ds, batch_size=8, shuffle=True, num_workers=0)
     pw, cc = make_pos_weight_from_videos(train_v, class_names)
-    print(f"鏋佸皬闆? {len(train_v)} 瑙嗛, {len(ds)} 鏍锋湰, device={device}, 鍙鍙傛暟鍏ㄥ紑")
+    print(f"极小集: {len(train_v)} 视频, {len(ds)} 样本, device={device}, 可训参数全开")
 
     model = build_model(cfg, num_classes).to(device)
     model.set_head(num_classes, class_counts=cc)
     model.unfreeze_all()   # 全解冻, 测架构最大学习能力
     criterion = FocalLossBCE(pos_weight=pw.to(device), label_smoothing=0.05,
                                 exclusive_weight=float(cfg["LOSS"].get("binary_exclusivity_weight", 0.0)))
-    l2sp = L2SPRegularizer(model, alpha=0, beta=0)   # 杩囨嫙鍚堟祴璇曞叧 L2-SP, 鍙湅璁板繂鑳藉姏
+    l2sp = L2SPRegularizer(model, alpha=0, beta=0)   # 过拟合测试关 L2-SP, 只看记忆能力
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.0)
 
-    print("\n=== 杩囨嫙鍚堟祴璇?(鏋舵瀯鑳藉惁璁板繂灏忔牱鏈? ===")
+    print("\n=== 过拟合测试 (结构能否记忆小样本) ===")
     # 抽出 loader 全部 batch, 循环跑满 args.steps 步
     all_batches = [(x.to(device), y.to(device)) for x, y in ld]
     print(f"batch 数={len(all_batches)}, 循环至 {args.steps} 步")
@@ -77,14 +77,14 @@ def main():
         if step in (0, 1, 9, args.steps // 2, args.steps - 1):
             print(f"  step{step:3d} loss={loss.item():.3f} train_acc={tr_acc*100:.1f} NaN={g_nan}")
 
-    print(f"\n=== 鍒ゅ畾 ===")
+    print(f"\n=== 判定 ===")
     print(f"末步 loss={loss.item():.3f} | 峰值 train_acc={best_tr_acc*100:.1f}%")
     if best_tr_acc >= 80:
-        print("缁撹: 鉁?鏋舵瀯鑳借繃鎷熷悎灏忔牱鏈?鈫?璁捐鍚堢悊, 鍊煎緱鍏ㄩ噺璁粌")
+        print("结论: 结构能过拟合小样本 -> 设计合理, 值得全量训练")
     elif best_tr_acc >= 50:
         print("结论: 结构可学但偏置, 可训练; 建议先调/检查 CPAM/头)")
     else:
-        print("缁撹: 鉂?鏋舵瀯杩炲皬鏍锋湰閮借繃鎷熷悎涓嶄簡 鈫?璁捐鏈夐棶棰? 鍏堜慨鍐嶈")
+        print("结论: 结构连小样本都过拟合不了 -> 设计有问题, 先修再训")
 
 
 if __name__ == "__main__":

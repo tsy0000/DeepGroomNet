@@ -1,6 +1,6 @@
 """DeepGroomNet_v3 - 浼樺寲鍣?瓒呭弬鎼滅储銆?
 用 optuna (若未安装则退化为轻量随机搜索) 搜索训练超参,
-鐩爣 = val F1_macro (涓?train.py 鍚屼竴鍚庡鐞嗗彛寰?銆?
+目标 = val F1_macro (与 train.py 同一后处理口径)。
 鐢ㄦ硶:
   D:\\Anaconda3\\envs\\python310\\python.exe scripts/03_search_hyperparams.py --trials 20
   可选: --config configs/config.yaml --subset-videos 12
@@ -64,10 +64,10 @@ def run_trial(cfg, params, device):
         label_smoothing=float(cfg["LOSS"].get("binary_label_smoothing", 0.05)),
     )
     l2sp = L2SPRegularizer(model, alpha=1e-5, beta=1e-3)
-    # 鎼滅储闃舵鐩存帴鍏ㄩ噺璁?(LP-FT) 灏戦噺 epoch
+    # 搜索阶段直接全量训 (LP-FT) 少量 epoch
     model.freeze_backbone()
     make_optimizer(model, params["lp_lr"], 1.0, params["weight_decay"])
-    # 鐢ㄧ煭 LP 鎵惧埌 head, 鍐?LP-FT
+    # 用短 LP 找到 head, 再 LP-FT
     epochs = max(2, int(params["epochs"]) // 3)
     from scripts.train import train_stage
     model.unfreeze_all()

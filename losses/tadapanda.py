@@ -56,9 +56,11 @@ class FocalBCE(nn.Module):
         super().__init__()
         self.gamma = gamma
         self.reduction = reduction
-        # pos_weight: (num_classes,) 或 None
-        self.pos_weight = torch.tensor(pos_weight, dtype=torch.float32) \
-            if pos_weight is not None else None
+        # pos_weight: (num_classes,) tensor 或 list/None
+        if pos_weight is not None:
+            self.pos_weight = torch.as_tensor(pos_weight, dtype=torch.float32)
+        else:
+            self.pos_weight = None
 
     def forward(self, logits, targets):
         """logits: (N, C) 未激活; targets: (N, C) 0/1."""
