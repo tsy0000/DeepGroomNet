@@ -16,7 +16,7 @@ import argparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "third_party"))
+sys.path.insert(0, ROOT)
 
 import numpy as np
 import math
@@ -247,11 +247,15 @@ def evaluate(model, loader, cfg, device, criterion=None, class_names=None):
 
     对齐 DeepEthogram 官方: 输出每类独立 sigmoid 概率 (非 argmax),
     用逐类阈值二值化 (background=valid_bg), 逐类算 acc/f1/recall/precision。
+    带 tqdm 进度条 (val/test 在控制台与日志均可见)。
     """
     model.eval()
     probs, labels = [], []
     loss_acc = None
-    for x, y in loader:
+    tag = getattr(loader, "_eval_tag", "eval")
+    n_samples = len(loader.dataset) if hasattr(loader, "dataset") else "?"
+    pbar = tqdm(loader, desc=f"[{tag}] evaluating ({n_samples} samples)", leave=False)
+    for x, y in pbar:
         x, y = x.to(device), y.to(device)
         out = model(x)
         if isinstance(out, tuple):
@@ -437,6 +441,8 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
                       "grad_nan": int(grad_nan_sum)}
 
         # val 评估 (DeepEthogram: 每类阈值网格 + valid_bg + mean F1 nobg; 可加时序平滑)
+        print(f"[{tag}] ep{epoch+1}/{epochs} 训练完成, 验证中... (val样本={len(va_ld.dataset)})", flush=True)
+        va_ld._eval_tag = f"{tag}/val"
         P, Y, val_loss_dict, per_class = evaluate(
             model, va_ld, cfg, device, criterion=criterion, class_names=class_names)
         if cfg["POSTPROCESS"].get("temporal_smooth", False):
@@ -656,8 +662,14 @@ def main():
             n_cpam = sum(p.numel() for p in model.cpam.parameters()) if model.cpam else 0
             n_head = sum(p.numel() for p in model.head.parameters())
             print(f"[OFT] 冻结前3stage, 训 Stage4({n_st4})+STSA({n_stsa})+CPAM({n_cpam})+head({n_head})")
+            # OFT 验证用"小分层验证集", 避免对全量 oft_ld 再跑一遍 (验证静默且耗时)
+            oft_val_ds = FrameLevelDataset(oft_v, cfg, split="val",
+                                           class_names=oft_classes, frame_window=frame_window)
+            oft_val_ld = build_loader(oft_val_ds, cfg, split="val", batch_size=bs,
+                                      num_workers=nw, shuffle=False)
+            print(f"[OFT] 验证集: {len(oft_val_ds)} 样本 (小, 快速)")
             oft_best = train_stage(
-                model, oft_ld, oft_ld, cfg, oft_crit, oft_classes, device,
+                model, oft_ld, oft_val_ld, cfg, oft_crit, oft_classes, device,
                 len(oft_classes),
                 epochs=int(oft.get("epochs", 10)),
                 base_lr=float(oft.get("lr", 2e-4)),
@@ -730,6 +742,7 @@ def main():
                                class_names=class_names, frame_window=frame_window)
         ld = build_loader(ds, cfg, split="val", batch_size=bs,
                           num_workers=nw, shuffle=False)
+        ld._eval_tag = name
         P, Y, loss_dict, tpc = evaluate(model, ld, cfg, device,
                                         criterion=criterion, class_names=class_names)
         if cfg["POSTPROCESS"].get("temporal_smooth", False):

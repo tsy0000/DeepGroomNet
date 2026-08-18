@@ -8,8 +8,7 @@ import os
 import sys
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, PROJECT_ROOT)
-sys.path.insert(0, os.path.join(PROJECT_ROOT, "third_party"))
+sys.path.insert(0, PROJECT_ROOT)   # 项目根在 sys.path (vendored tadaconv 为顶层包)
 
 import cv2
 import torch

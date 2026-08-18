@@ -12,7 +12,7 @@ import argparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "third_party"))
+sys.path.insert(0, ROOT)
 
 import numpy as np
 import torch

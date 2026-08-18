@@ -2,7 +2,7 @@
 TAdaConvModel - 完整模型组装 (TAdaConvNeXtV2 + STSA + CPAM + 双分类头)。
 
 严格遵循:
-  1. 主干 = 官方 TAdaConv-main 的 TAdaConvNeXtV2 (third_party/tadaconv),
+  1. 主干 = 官方 TAdaConv-main 的 TAdaConvNeXtV2 (tadaconv),
      直接复用官方 TAdaConvNeXtV2Block + LayerNorm, 不修改官方代码。
   2. 主干组装方式照抄官方 ConvNeXt (backbone.py): stem + 3 downsample + 4 stages。
   3. STSA 插在 Stage3/4 之后 (主路径, 即插即用, 零新增主干参数)。
@@ -18,13 +18,13 @@ import torch.nn as nn
 from types import SimpleNamespace
 from collections import OrderedDict
 
-# 确保 third_party 可导入 (官方 tadaconv 包)
+# 确保 vendored tadaconv 可导入 (官方 tadaconv 包)
 _PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_TP = os.path.join(_PKG_ROOT, "third_party")
+_TP = _PKG_ROOT
 if _TP not in sys.path:
     sys.path.insert(0, _TP)
 
-# 官方 TAdaConvNeXtV2 组件 (third_party/tadaconv)
+# 官方 TAdaConvNeXtV2 组件 (tadaconv)
 from tadaconv.models.module_zoo.branches.tadaconvnextv2 import TAdaConvNeXtV2Block
 from tadaconv.models.module_zoo.ops.misc import LayerNorm
 

@@ -12,7 +12,7 @@ import sys
 
 ROOT = r'D:\DeepGroomNet_v3'
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, 'third_party'))
+sys.path.insert(0, ROOT)
 
 import torch
 import torch.nn as nn
@@ -94,11 +94,12 @@ def trace_forward():
 
 def torchinfo_summary(model):
     print('\n' + '=' * 72)
-    print('METHOD 2 - TORCHINFO STRUCTURAL SUMMARY (module presence only)')
+    print('METHOD 2 - TORCHINFO STRUCTURAL SUMMARY (top-level overview)')
     print('=' * 72)
     from torchinfo import summary
     dummy = torch.randn(2, 3, 32, 224, 224)
-    summary(model, input_data=dummy, depth=6, verbose=2)
+    print(summary(model, input_data=dummy, depth=2, verbose=0,
+                  col_names=["input_size", "output_size", "num_params"]))
 
 
 def design_checklist():

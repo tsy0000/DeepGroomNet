@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "third_party"))
+sys.path.insert(0, ROOT)
 
 from data.dataset import FrameLevelDataset
 from scripts.train import build_model

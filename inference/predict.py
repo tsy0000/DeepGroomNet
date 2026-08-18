@@ -14,7 +14,7 @@ import torch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "third_party"))
+sys.path.insert(0, ROOT)
 
 import cv2
 from models.tadaconv_model import TAdaConvModel

@@ -82,12 +82,12 @@ def main():
         src = os.path.basename(root)
         all_videos.extend(build_from_root(root, src))
 
-    # 按小鼠划分 (train/val/test = 0.7/0.15/0.15, 小鼠不重叠)
+    # 按小鼠划分 (train/val/test = 0.7/0.2/0.1, 小鼠不重叠, 7:2:1)
     random.seed(42)
     mice = sorted(set(v["mouse"] for v in all_videos))
     random.shuffle(mice)
-    n_val = int(len(mice) * 0.15)
-    n_test = int(len(mice) * 0.15)
+    n_val = int(len(mice) * 0.2)
+    n_test = int(len(mice) * 0.1)
     val_mice = set(mice[:n_val])
     test_mice = set(mice[n_val:n_val + n_test])
     train_v = [v for v in all_videos

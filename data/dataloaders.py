@@ -1,76 +1,85 @@
 # -*- coding: utf-8 -*-
-"""数据加载器 + 类别不平衡处理 (过采样/加权采样, DeepEthogram 范式).
+"""数据加载器 + 类别不平衡处理 (Swin-Panda 均匀过采样).
 
-类别不平衡 (FG 4.3% / BG 1.9%) 的成熟做法 (DeepEthogram 官方):
-  1. pos_weight 加权损失 (已在 losses 处理).
-  2. 训练期加权采样 (oversample 稀有类) - 本模块实现.
-  3. 稀有类偏置初始化 (已在 loss 内, rare_class_bias_init).
-
-加权采样器按"每视频帧级类别频率"给样本权重: 稀有类占比高的视频权重放大,
-从而每个 epoch 稀有类样本被抽到的概率提升。权重长度 = len(dataset) 精确对齐
-FrameLevelDataset (每个样本 idx -> videos[idx // clips_per_video])。
+依据 Swin-Panda (Diversity 2025,17,139) 3.2 节:
+  "samples from categories with fewer instances than the dataset's average are replicated.
+   Uniform sampling ensures that the frame sequences of the replicated samples are not
+   identical..."   (Table 1: 稀有类复制到平均值, 如 Scratching 88->157)
+即: 每类窗口数低于平均值的类别, 复制(不同起始窗口, 分段均匀采样)补到平均值;
+高于平均值的类别保持原量。另配 pos_weight 加权损失 + 稀有类偏置初始化。
 """
+import math
 import torch
+import numpy as np
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from .dataset import FrameLevelDataset, make_pos_weight_from_videos
 
 
-def build_oversampled_sampler(dataset, power=0.5, seed=42, videos=None):
-    """为 dataset 的每个样本生成采样权重, 稀有类过采样。
+def build_oversampled_sampler(dataset, samples_per_class=None, seed=42):
+    """Swin-Panda 均匀过采样采样器 (稀有类补目标, 限制 epoch 大小).
 
-    weights[i]: 样本 i 所在视频的类别不平衡度。对视频内各类别频率取
-    (1/freq)^power, 用视频内各类别的最大提升(稀有类占比越高权重越大),
-    并归一化到与样本数对齐。
+    依据 Swin-Panda (Diversity 2025,17,139) 3.2 节: 稀有类样本复制补到目标量,
+    复制用不同起始窗口 -> 帧序列不重复。
 
-    Args:
-        dataset: FrameLevelDataset (需有 .videos, .class_names, .clips_per_video)
-        power: 放大指数 (DeepEthogram 用 ~0.5).
-        videos: 可选, 覆盖 dataset.videos.
+    samples_per_class 为"每类目标上限" (数值测算):
+      常见类(窗口数 > 目标) -> 随机下采样到目标 (保留子集, 控制 epoch 大小)
+      稀有类(窗口数 < 目标) -> 复制补到目标
+      每 epoch 步数 = K × samples_per_class / batch_size  (精确可控)
+    若 samples_per_class 为 None, 则按论文用"有样本类的平均"作目标 (不设上限)。
     """
     import numpy as np
+    import torch
+    K = len(dataset.class_names)
+    videos = dataset.videos
+    fw = dataset.frame_window
+    rng = np.random.default_rng(seed)
+
+    pools = [[] for _ in range(K)]
+    for vi, v in enumerate(videos):
+        lab = np.asarray(v["labels"])
+        nfr = int(v["n_frames"])
+        for c in range(K):
+            centers = np.where(lab == c)[0]
+            for cfr in centers:
+                s = int(max(0, min(int(cfr) - fw // 2, nfr - fw)))
+                pools[c].append((vi, s))
+    counts = np.array([len(p) for p in pools], dtype=np.float64)
+
+    if samples_per_class is not None and samples_per_class > 0:
+        target = int(samples_per_class)
+    else:
+        present = counts[counts > 0]
+        target = math.ceil(float(np.mean(present))) if len(present) else 1
+
+    windows = []
+    for c in range(K):
+        pool = pools[c]
+        n_c = len(pool)
+        if n_c == 0:
+            continue
+        if n_c >= target:                       # 常见类: 下采样到目标
+            idx = rng.choice(n_c, size=target, replace=False)
+            windows += [pool[int(i)] for i in idx]
+        else:                                   # 稀有类: 复制补到目标
+            idx = rng.integers(0, n_c, size=target - n_c)
+            windows += pool + [pool[int(i)] for i in idx]
+
+    dataset.fixed_windows = windows
+    weights = torch.ones(len(windows))
     gen = torch.Generator().manual_seed(seed)
-    videos = videos if videos is not None else dataset.videos
-    class_names = dataset.class_names
-    K = len(class_names)
-
-    # 每视频: 各类别帧频率
-    freq = []  # freq[v][c] = 该视频 c 类帧占比
-    for v in videos:
-        labels = np.asarray(v["labels"])
-        cnt = np.bincount(labels, minlength=K).astype(np.float64)
-        cnt = np.clip(cnt, 1e-3, None)
-        total = cnt.sum()
-        freq.append(cnt / total)
-
-    n_videos = len(videos)
-    cper = getattr(dataset, "clips_per_video", 1)
-    n_samples = len(dataset)
-
-    weights = np.zeros(n_samples, dtype=np.float64)
-    for i in range(n_samples):
-        vi = i // cper if cper > 0 else 0
-        vi = min(vi, n_videos - 1)
-        f = freq[vi]
-        w = float(np.max((1.0 / f) ** power))   # 取该视频稀有类放大后的最大权重
-        weights[i] = w
-
-    # 归一化到均值 1, 避免数值过大
-    if weights.sum() > 0:
-        weights = weights / weights.mean()
-    return torch.from_numpy(weights).float()
+    return WeightedRandomSampler(weights, num_samples=len(windows),
+                                 replacement=True, generator=gen)
 
 
 def build_loader(dataset, cfg, split="train", batch_size=8, num_workers=4,
-                 shuffle=True, weighted=False, seed=42):
-    """构造 DataLoader, 可选加权采样 (过采样)."""
+                 shuffle=True, balanced=True, seed=42):
+    """构造 DataLoader; 训练开启 Swin-Panda 均匀过采样 (含每类目标上限). """
     kw = dict(batch_size=batch_size, num_workers=num_workers,
               pin_memory=torch.cuda.is_available(), drop_last=(split == "train"))
 
-    if split == "train" and weighted and hasattr(dataset, "videos"):
-        weights = build_oversampled_sampler(dataset)
-        gen = torch.Generator().manual_seed(seed)
-        sampler = WeightedRandomSampler(weights, num_samples=len(dataset),
-                                        replacement=True, generator=gen)
+    if split == "train" and balanced and hasattr(dataset, "videos"):
+        spc = cfg["TRAIN"].get("samples_per_class")
+        sampler = build_oversampled_sampler(dataset, samples_per_class=spc, seed=seed)
         kw["shuffle"] = False
         kw["sampler"] = sampler
     else:

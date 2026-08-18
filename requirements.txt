@@ -12,7 +12,7 @@ simplejson
 yacs
 
 # Video backbone (TAdaConv) deps
-# (sourced from third_party/)
+# (sourced from tadaconv/)
 
 # Detection & preprocessing
 ultralytics

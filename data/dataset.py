@@ -29,7 +29,7 @@ class FrameLevelDataset(Dataset):
     vs 随机 seek 8.8ms/帧)。内存不足时退回按需 seek。
     """
     def __init__(self, videos, cfg, split="train", class_names=None, frame_window=16,
-                 random_start=True, clips_per_video=None):
+                 random_start=True, clips_per_video=None, fixed_windows=None):
         self.videos = videos
         self.cfg = cfg
         self.split = split
@@ -38,6 +38,9 @@ class FrameLevelDataset(Dataset):
         self.class_to_idx = {c: i for i, c in enumerate(self.class_names)}
         self.frame_window = frame_window
         self.random_start = random_start and self.train
+        # 类平衡采样: 预计算的 (video_idx, start) 窗口列表 (中心帧=指定类),
+        # 提供时训练模式直接用固定窗口, 保证逐类均匀采样 (修复过采样失效).
+        self.fixed_windows = fixed_windows
         self.n_frames = frame_window
         self.size = int(cfg["CLIP"]["target_size"])
         self.in_ch = 3  # 固定 3 通道 RGB (3D 骨干已在内部建模运动, 无需帧差通道)
@@ -83,6 +86,8 @@ class FrameLevelDataset(Dataset):
 
     def __len__(self):
         if self.train:
+            if self.fixed_windows is not None:
+                return len(self.fixed_windows)
             return len(self.videos) * self.clips_per_video
         return sum(self._class_count.values())
 
@@ -130,9 +135,14 @@ class FrameLevelDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.train:
-            v = self.videos[idx // self.clips_per_video]
-            labels = np.asarray(v["labels"])
-            start = self._sample(v)
+            if self.fixed_windows is not None:
+                vi, start = self.fixed_windows[idx]
+                v = self.videos[vi]
+                labels = np.asarray(v["labels"])
+            else:
+                v = self.videos[idx // self.clips_per_video]
+                labels = np.asarray(v["labels"])
+                start = self._sample(v)
         else:
             # val: 分层索引 -> (video_idx, start)
             for i in range(len(self.class_names)):
@@ -151,7 +161,11 @@ class FrameLevelDataset(Dataset):
         # 读帧
         frames = self._read_frames(v["video"], start, self.frame_window)
         if self.yolo_boxes:
-            frames = [self._crop(f, v["video"]) for f in frames]
+            # Swin-Panda 式: 用窗口中心帧的小鼠裁剪框, 对整个窗口一致裁剪 (时间稳定)
+            center_abs = min(start + self.frame_window // 2, v["n_frames"] - 1)
+            box = self._clip_box(v["video"], center_abs)
+            if box is not None:
+                frames = [self._crop(f, box) for f in frames]
         arr = np.stack([cv2.resize(f, (self.size, self.size)) for f in frames]).astype(np.float32) / 255.0
         arr = np.transpose(arr, (0, 3, 1, 2))  # [T,C,H,W] = [T,3,H,W]
         # 增强
@@ -165,10 +179,30 @@ class FrameLevelDataset(Dataset):
         y = int(labels[center])
         return torch.from_numpy(x), y
 
-    def _crop(self, fr, video_path):
-        """按该视频的 YOLO 稳定框裁剪 (clip 到边界), 返回裁剪后的帧 (未 resize)。"""
+    def _clip_box(self, video_path, abs_frame):
+        """取绝对帧 abs_frame 处的小鼠裁剪框 (兼容新旧格式)。
+
+        新格式 (Swin-Panda): {key: {"stride": s, "boxes": [[x1,y1,x2,y2]...]}}
+          boxes[k] 对应帧 k*s, 取最近采样框。
+        旧格式: {key: [x1,y1,x2,y2]}  (单稳定框, 直接返回)。
+        """
         key = os.path.splitext(os.path.basename(video_path))[0]
-        box = (self.yolo_boxes or {}).get(key)
+        entry = (self.yolo_boxes or {}).get(key)
+        if entry is None:
+            return None
+        if isinstance(entry, dict) and "boxes" in entry:
+            stride = int(entry["stride"])
+            boxes = entry["boxes"]
+            if not boxes:
+                return None
+            k = int(round(abs_frame / stride))
+            k = min(max(k, 0), len(boxes) - 1)
+            return boxes[k]
+        # 旧格式: 单稳定框 [x1,y1,x2,y2]
+        return entry if isinstance(entry, list) and len(entry) == 4 else None
+
+    def _crop(self, fr, box):
+        """按给定框裁剪 (clip 到边界), 返回裁剪后的帧 (未 resize)。"""
         if box is None:
             return fr
         H, W = fr.shape[:2]

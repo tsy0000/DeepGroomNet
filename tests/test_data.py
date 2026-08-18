@@ -31,15 +31,35 @@ def test_dataset_length():
 
 
 def test_oversampler_weights():
-    """过采样: 稀有类权重更大."""
+    """Swin-Panda 均匀过采样: 稀有类补到平均值, 常见类保留."""
     from data.dataloaders import build_oversampled_sampler
-    class_names = ["A", "B"]
-    labels = np.zeros(5000, dtype=int)
-    labels[200:300] = 1   # 2% B
-    videos = [{"video": "v.mp4", "labels": labels, "n_frames": 5000}]
-    w = build_oversampled_sampler(videos, class_names)
-    assert len(w) > 0
-    print(f"[OK] 过采样权重序列长度={len(w)}, 全部>0={all(x > 0 for x in w)}")
+    class_names = ["A", "B", "C"]
+    cfg = {"CLIP": {"target_size": 224, "norm_mean": 0.45, "norm_std": 0.225},
+           "CLASSES": {"openfield": class_names},
+           "DATA": {"meta_root": "outputs/meta"},
+           "TRAIN": {"clips_per_video": 50}}
+    # 构造极不平衡假视频: A 常见, B 中等, C 极稀有
+    videos = []
+    for vi in range(3):
+        labels = np.zeros(2000, dtype=int)
+        labels[:1200] = 0      # A 60%
+        labels[1200:1600] = 1  # B 20%
+        labels[1600:1640] = 2  # C 2%
+        videos.append({"video": f"v{vi}.mp4", "labels": labels,
+                       "n_frames": 2000, "mouse": f"m{vi}", "source": "syn"})
+    ds = FrameLevelDataset(videos, cfg, split="train", class_names=class_names,
+                           frame_window=16, clips_per_video=50)
+    sampler = build_oversampled_sampler(ds, seed=0)
+    fw = ds.fixed_windows
+    from collections import Counter
+    cnt = Counter()
+    for vi, s in fw:
+        center = s + 16 // 2
+        cnt[int(videos[vi]["labels"][center])] += 1
+    # 稀有类 C 应被补到平均; 常见类 A 保留最多
+    assert cnt[2] > 0, "稀有类应被过采样"
+    assert cnt[0] >= cnt[2], "常见类不应少于稀有类"
+    print(f"[OK] 均匀过采样窗口数 per-class={dict(cnt)} (稀有类补到平均)")
 
 
 if __name__ == "__main__":
