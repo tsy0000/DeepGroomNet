@@ -156,7 +156,7 @@ def build_videos_from_root(root, source, class_names=None):
     return videos
 
 
-def build_oft_videos(root, class_names=None, fps=25.0):
+def build_oft_videos(root, class_names=None, fps=25.0, labeler="Jin"):
     """Sturman-OFT 预训练数据: bout区间标签 (from/to秒 + type) -> 逐帧类索引。
 
     OFT 标签文件 AllLabDataOFT_final.csv 含 3 位标注者, 每行一条 bout:
@@ -167,6 +167,9 @@ def build_oft_videos(root, class_names=None, fps=25.0):
         root: OFT 数据目录 (含 AllLabDataOFT_final.csv + OFT_*.mp4)
         class_names: [background, Supported, Unsupported, Grooming, Jumping]
         fps: OFT 视频帧率 (Sturman 为 25fps)。
+        labeler: 标注者名 ('Jin'/'Furkan'/'Oliver') 或 'ALL'(合并3人)。
+            论文图2H 用 Jin (论文方法: "chose Jin as the labeler"),
+            类别占比与论文一致需用单标注者 Jin。
     """
     import cv2 as _cv2
     import numpy as _np
@@ -185,7 +188,7 @@ def build_oft_videos(root, class_names=None, fps=25.0):
     if not csv_path:
         print("  OFT: 未找到标注CSV")
         return videos
-    # 读 bout 标注, 记录每个视频 ID
+    # 读 bout 标注, 记录每个视频 ID + 标注者
     with open(csv_path, encoding="utf-8", errors="replace") as f:
         raw = f.read()
     per_video = {}  # vid_id -> list of (fr, to, idx)
@@ -195,7 +198,9 @@ def build_oft_videos(root, class_names=None, fps=25.0):
         parts = [x.strip().strip('"') for x in ln.split(";")]
         if len(parts) < 6:
             continue
-        fr, to, typ, vid_id = parts[2], parts[3], parts[4], parts[5]
+        exp, fr, to, typ, vid_id = parts[1], parts[2], parts[3], parts[4], parts[5]
+        if labeler != "ALL" and exp != labeler:
+            continue
         try:
             fr, to = float(fr), float(to)
         except ValueError:
@@ -203,8 +208,9 @@ def build_oft_videos(root, class_names=None, fps=25.0):
         if typ in offtype_to_idx:
             per_video.setdefault(vid_id, []).append((fr, to, offtype_to_idx[typ]))
     if not per_video:
-        print("  OFT: 无有效 bout")
+        print(f"  OFT: 无有效 bout (labeler={labeler})")
         return videos
+    print(f"  OFT: 使用标注者 '{labeler}'")
     # 每个视频构建
     for vid_id, bb in sorted(per_video.items()):
         video_path = os.path.join(root, f"{vid_id}.mp4")
@@ -599,8 +605,8 @@ def main():
                          num_workers=nw, balanced=use_balanced,
                          seed=int(cfg["TRAIN"].get("seed", 42)))
     if use_balanced:
-        print(f"[sampler] 训练启用类平衡过采样 (逐类均匀抽中心帧窗口), "
-              f"每类样本数={len(train_ds.fixed_windows)}")
+        print(f"[sampler] 训练启用 Swin-Panda 均匀过采样 (稀有类补到平均值), "
+              f"平衡窗口总数={len(train_ds.fixed_windows)}")
     va_ld = build_loader(val_ds, cfg, split="val", batch_size=bs,
                          num_workers=nw, shuffle=False)
 
