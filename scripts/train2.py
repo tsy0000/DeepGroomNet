@@ -200,8 +200,9 @@ def main():
     # ============ LP 阶段 (跳过若已完成) ============
     lp_done = os.path.exists(os.path.join(ckpt_dir, "lp_best.pt"))
     if bool(lp.get("enable", False)) and not lp_done:
-        print("[resume] LP 阶段: 冻结主干, 只训 head+STSA+CPAM", flush=True)
-        model.freeze_backbone()
+        # 论文策略: 冻结前 3 stage, 训 Stage4 + head + STSA + CPAM (Stage4 始终可训)
+        print("[resume] LP 阶段: 冻结前3stage, 训 Stage4+head+STSA+CPAM", flush=True)
+        model.freeze_first_stages(3)
         train_stage(model, tr_ld, va_ld, cfg, make_criterion(cfg, num_classes, pw, device),
                     class_names, device, num_classes,
                     epochs=int(lp.get("epochs", 5)),

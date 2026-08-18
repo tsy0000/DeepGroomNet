@@ -724,8 +724,8 @@ def main():
     lpft = cfg["TRAIN"].get("lpft", {})
     do_lp = bool(lp.get("enable", False))
     if do_lp:
-        # 阶段1: Linear Probe -- 冻结主干(含STSA), 只训 head + cpam (新增模块保持可训)
-        model.freeze_backbone()
+        # 论文策略: 冻结前 3 stage, 训 Stage4 + head + STSA + CPAM (Stage4 始终可训)
+        model.freeze_first_stages(3)
         n_head_params = sum(p.numel() for p in model.head.parameters())
         n_cpam_params = (sum(p.numel() for p in model.cpam.parameters())
                          if model.cpam is not None else 0)
@@ -733,7 +733,7 @@ def main():
                          if model.stsa3 is not None else 0) + \
                         (sum(p.numel() for p in model.stsa4.parameters())
                          if model.stsa4 is not None else 0)
-        print(f"[LP] 冻结主干, 只训 head ({n_head_params}) + "
+        print(f"[LP] 冻结前3stage, 训 Stage4 ({n_head_params}head) + "
               f"stsa ({n_stsa_params}) + cpam ({n_cpam_params}) 参数")
         train_stage(
             model, tr_ld, va_ld, cfg, criterion, class_names, device,

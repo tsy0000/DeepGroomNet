@@ -47,18 +47,6 @@ def _official_block_cfg():
     )
 
 
-class _CkptBlock(nn.Module):
-    """梯度检查点包装: 训练时重算激活以省显存, 推理时直通. 仅包单个 block. """
-    def __init__(self, block):
-        super().__init__()
-        self.block = block
-
-    def forward(self, x):
-        if self.training:
-            return torch.utils.checkpoint.checkpoint(self.block, x, use_reentrant=False)
-        return self.block(x)
-
-
 def load_pretrained(model, weight_path, device="cpu"):
     """加载官方 .pyth 预训练权重 (K400/SSv2), 兼容 prefix: backbone./module.backbone./无前缀.
 
@@ -139,15 +127,13 @@ class TAdaConvModel(nn.Module):
         dp_rates = [x.item() for x in torch.linspace(0, drop_path, sum(self.depths))]
         cur = 0
         for i in range(n_stages):
-            blocks = [
+            # 注意: 不外包 _CkptBlock (会改参数名, 破坏 load_pretrained);
+            #       checkpoint 在 forward_features 里对每个 block 直接应用.
+            self.stages.append(nn.Sequential(*[
                 TAdaConvNeXtV2Block(blk_cfg, dim=dims[i], drop_path=dp_rates[cur + j],
                                     layer_scale_init_value=1e-6)
                 for j in range(self.depths[i])
-            ]
-            # 梯度检查点: 训练时用激活重算换显存 (eval 走原路径)
-            if use_checkpoint:
-                blocks = [_CkptBlock(b) for b in blocks]
-            self.stages.append(nn.Sequential(*blocks))
+            ]))
             cur += self.depths[i]
 
         # ---- 最终 norm (官方 ConvNeXt 同款) ----
@@ -251,7 +237,11 @@ class TAdaConvModel(nn.Module):
         stages_feat = []
         for i in range(4):
             x = self.downsample_layers[i](x)
-            x = self.stages[i](x)
+            for blk in self.stages[i]:
+                if self.use_checkpoint and self.training:
+                    x = torch.utils.checkpoint.checkpoint(blk, x, use_reentrant=False)
+                else:
+                    x = blk(x)
             stages_feat.append(x)               # 收集原始 stage 输出 (STSA 之前)
             if i == 2 and self.stsa3 is not None:
                 x = self.stsa3(x)               # Stage3 后插 STSA
