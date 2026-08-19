@@ -236,7 +236,7 @@ def main():
     apply_global_styling()
     logger = setup_logging()
 
-    st.markdown('<div id="super-title-container"><div id="super-title">Mouse Behavior Prediction System</div></div>',
+    st.markdown('<div id="super-title-container"><div id="super-title">🐭 Mouse Behavior Prediction System</div></div>',
                 unsafe_allow_html=True)
 
     if 'temp_video_path' not in st.session_state:
