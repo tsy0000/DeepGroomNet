@@ -33,6 +33,7 @@ from postprocess.thresholds import (evaluate_thresholds, threshold_predict,
                                     compute_background, min_bout_per_behavior,
                                     binary_metrics, smooth_probabilities,
                                     hmm_smooth, bout_stats)
+from postprocess.ethogram_metrics import ethogram_metrics  # DeepEthogram 官方指标迁移
 from torch.utils.data import DataLoader  # noqa: F401
 
 
@@ -303,24 +304,17 @@ def evaluate(model, loader, cfg, device, criterion=None, class_names=None, thres
 
     per_class = None
     used_thresholds = thresholds
+    epoch_metrics = None
     if class_names is not None:
-        if thresholds is None:
-            # 无外部阈值时在本数据集上调优 (仅作参考上限, 不应用于模型选择)
-            used_thresholds, _ = evaluate_thresholds(Y, P, class_names, bg_idx=bg_idx)
-            thr_label = "调优阈值"
-        else:
-            thr_label = "外部固定阈值"
-        pred = threshold_predict(P, used_thresholds, class_names)
-        pred = compute_background(pred, bg_idx=bg_idx)
-        eye = (Y[:, None] == np.arange(len(class_names))).astype(int)
-        per_class = binary_class_metrics(eye, pred, class_names)
-        # 详细记录: 每类阈值 + 样本数
+        # DeepEthogram 官方 evaluate_thresholds: 每类 argmax-F1 调阈值 + valid_bg(background=NOT others)
+        # 在给定数据上直接调优并报指标 (官方行为), 阈值随 split 独立。
+        epoch_metrics, per_class, used_thresholds = ethogram_metrics(P, Y, class_names, bg_idx=bg_idx)
         cnt = np.bincount(Y.astype(np.int64), minlength=len(class_names))
-        thr_str = ", ".join(f"{c}={used_thresholds.get(c, 0.5):.3f}" for c in class_names)
+        thr_str = ", ".join(f"{c}={float(used_thresholds[i]):.3f}" for i, c in enumerate(class_names))
         cnt_str = ", ".join(f"{c}={int(cnt[i])}" for i, c in enumerate(class_names))
         print(f"  [{tag}] 每类样本数: {cnt_str}", flush=True)
-        print(f"  [{tag}] 每类{thr_label}: {thr_str}", flush=True)
-    return P, Y, loss_dict, per_class, used_thresholds
+        print(f"  [{tag}] 每类官方阈值(argmax-F1+valid_bg): {thr_str}", flush=True)
+    return P, Y, loss_dict, per_class, used_thresholds, epoch_metrics
 
 
 def save_metrics(path, epoch, class_names, per_class, val_f1m, grad_epoch=None,
@@ -489,55 +483,36 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
                       "grad_max": grad_max_sum / max(1, n_steps),
                       "grad_nan": int(grad_nan_sum)}
 
-        # ---- 用训练集概率调阈值 (避免在验证集自调导致过拟合) ----
+        # ---- 官方 DeepEthogram: 训练集上逐类 argmax-F1 调阈值 + valid_bg, 报训练集指标 ----
         tr_P = np.concatenate(tr_all_probs)
         tr_Y = np.concatenate(tr_all_labels)
-        train_thresholds, _ = evaluate_thresholds(tr_Y, tr_P, class_names, bg_idx=bg_idx)
-        thr_str = ", ".join(f"{c}={train_thresholds.get(c, 0.5):.3f}" for c in class_names)
-        print(f"[{tag}] ep{epoch+1}/{epochs} 训练集调优阈值: {thr_str}", flush=True)
+        tr_em, tr_per_class, train_thresholds = ethogram_metrics(tr_P, tr_Y, class_names, bg_idx=bg_idx)
+        thr_str = ", ".join(f"{c}={float(train_thresholds[i]):.3f}" for i, c in enumerate(class_names))
+        print(f"[{tag}] ep{epoch+1}/{epochs} 训练集官方阈值(argmax-F1+valid_bg): {thr_str}", flush=True)
+        tr_f1m = tr_em["f1_class_mean"]
 
-        # ---- 用同一调优阈值重算训练集指标 (与 val 同口径, 公平对比) ----
-        # 之前 tr_per_class 用的是 0.5 固定阈值, 与 val 的调优阈值不可比 (导致 train 明显偏低)。
-        # 现在 train/val 都用 train_thresholds 二值化。时序平滑仅对 val 生效 (训练样本是乱序 clip, 无法平滑)。
-        tr_pred_t = threshold_predict(tr_P, train_thresholds, class_names)
-        tr_pred_t = compute_background(tr_pred_t, bg_idx=bg_idx)
-        tr_eye = (tr_Y[:, None] == np.arange(num_classes)).astype(int)
-        tr_per_class = binary_class_metrics(tr_eye, tr_pred_t, class_names)
-        tr_f1m = f1_macro_from(tr_per_class, class_names)
-
-        # val 评估 (用训练集阈值, 避免验证集自调过拟合)
+        # val 评估 (官方 evaluate_thresholds: 在 val 上逐类 argmax-F1 调阈值 + valid_bg)
         print(f"[{tag}] ep{epoch+1}/{epochs} 训练完成, 验证中... (val样本={len(va_ld.dataset)})", flush=True)
         va_ld._eval_tag = f"{tag}/val"
-        P, Y, val_loss_dict, per_class, val_thresholds = evaluate(
-            model, va_ld, cfg, device, criterion=criterion, class_names=class_names,
-            thresholds=train_thresholds)
-        if cfg["POSTPROCESS"].get("temporal_smooth", False):
-            P = smooth_probabilities(P, int(cfg["POSTPROCESS"].get("smooth_window", 3)))
-            # 时序平滑后仍用训练集阈值
-            pred = threshold_predict(P, train_thresholds, class_names)
-            pred = compute_background(pred, bg_idx=bg_idx)
-            eye = (Y[:, None] == np.arange(num_classes)).astype(int)
-            per_class = binary_class_metrics(eye, pred, class_names)
-        val_f1m = f1_macro_from(per_class, class_names)
-        # DeepEthogram 官方上报指标 (eLife): overall accuracy + macro-F1(全类) + macro-AUROC
-        #   - overall accuracy: 逐帧 argmax 命中率 (DeepEthogram 报总体acc, 不报每类acc)
-        val_overall_acc = float((P.argmax(axis=1) == Y).mean())
-        #   - F1 = sklearn f1_score(average='macro'): 全类(含background) macro 平均
-        #   - AUROC = 逐类 AUROC 取平均 (macro AUROC)
-        val_auroc = macro_auroc(P, Y, class_names)
-        # 仅内部选模型/调参用 (DeepEthogram HPO 目标), 不作为上报核心结果:
-        #   mean F1 over non-background classes
-        val_f1m_nobg = float(np.mean(
-            [per_class[c]["f1"] for c in class_names[:-1]])) if len(class_names) > 1 else val_f1m
-        # select_metric: auroc(默认, DeepEthogram 也用 macro-AUROC, 阈值无关不过拟合) / f1_nobg / f1 / auprc
+        P, Y, val_loss_dict, per_class, val_thresholds, val_em = evaluate(
+            model, va_ld, cfg, device, criterion=criterion, class_names=class_names)
+        # DeepEthogram 官方上报指标 (eLife Evaluation 段):
+        #   accuracy_overall=所有类混淆矩阵求和后的二元acc; f1_class_mean=全类(含bg) macro-F1;
+        #   auroc_class_mean=逐类AUROC均值; mAP_class_mean=逐类mAP均值
+        val_f1m = val_em["f1_class_mean"]
+        val_f1m_nobg = val_em["f1_class_mean_nobg"]     # 按 bg_idx 排除 background (修 OFT bg=0 的 bug)
+        val_auroc = val_em["auroc_class_mean"]
+        val_overall_acc = val_em["accuracy_overall"]
+        val_mAP = val_em["mAP_class_mean"]
+        # select_metric: auroc(默认) / f1_nobg(DeepEthogram HPO目标) / f1 / mAP
         sel = cfg["TRAIN"].get("select_metric", "auroc")
-        if sel == "auprc":
-            sel_metric = macro_auprc(P, Y, class_names)
-        elif sel == "f1":
+        if sel == "f1":
             sel_metric = val_f1m
         elif sel == "f1_nobg":
             sel_metric = val_f1m_nobg
-        else:  # auroc (默认, 阈值无关, 不会过拟合验证集)
+        elif sel == "mAP":
+            sel_metric = val_mAP
+        else:  # auroc (默认, 阈值无关不过拟合)
             sel_metric = val_auroc
         save_metrics(metrics_csv, epoch, class_names, per_class, val_f1m, grad_epoch,
                      tr_loss=tr_loss, val_loss=val_loss_dict.get("total", 0.0) if val_loss_dict else 0.0,
