@@ -401,6 +401,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
         grad_l2_sum = 0.0; grad_max_sum = 0.0; grad_nan_sum = 0; n_steps = 0
         tr_tp = np.zeros(num_classes); tr_fp = np.zeros(num_classes)
         tr_fn = np.zeros(num_classes); tr_tn = np.zeros(num_classes); tr_n = 0
+        tr_corr = 0  # argmax 预测 == 真实标签 的样本数 (诚实总准确率)
         # background 类索引 (不硬编码末类: OFT 的 background=0)
         bg_idx = (class_names.index("background") if class_names and "background" in class_names
                   else (num_classes - 1 if class_names else None))
@@ -462,8 +463,9 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
                 tr_fn[i] += int(((t == 1) & (p_ == 0)).sum())
                 tr_tn[i] += int(((t == 0) & (p_ == 0)).sum())
             tr_n += x.size(0)
-            # tqdm 实时显示
-            tr_acc = float(np.mean([(tr_tp[i] + tr_tn[i]) / max(1, tr_n) for i in range(num_classes)]))
+            tr_corr += int((tr_probs.argmax(axis=1) == y_np).sum())
+            # tqdm 实时显示 (总准确率 = argmax, 不被真阴性注水)
+            tr_acc = tr_corr / max(1, tr_n)
             tr_f1s = np.where(tr_tp + tr_fn > 0,
                               2 * tr_tp / (2 * tr_tp + tr_fp + tr_fn + 1e-9), 0.0)
             pbar.set_postfix({"loss": f"{tr_loss/max(1,n_tr):.3f}",
@@ -473,7 +475,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
         tr_loss /= max(n_tr, 1)
         for k in tr_loss_components:
             tr_loss_components[k] /= max(n_tr, 1)
-        tr_acc = float(np.mean([(tr_tp[i] + tr_tn[i]) / max(1, tr_n) for i in range(num_classes)]))
+        tr_acc = tr_corr / max(1, tr_n)
         tr_per_class = {
             c: {"accuracy": (tr_tp[i] + tr_tn[i]) / max(1, tr_n) * 100,
                 "precision": tr_tp[i] / max(1e-9, tr_tp[i] + tr_fp[i]) * 100,

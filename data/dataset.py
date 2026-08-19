@@ -117,22 +117,6 @@ class FrameLevelDataset(Dataset):
             return 0
         return random.randint(0, n - self.frame_window)
 
-    def _val_start(self, idx):
-        """val/test: 按 idx 均匀取窗口 (覆盖但有限)。"""
-        vi = idx % len(self.videos)
-        wi = idx // len(self.videos)
-        v = self.videos[vi]
-        n = v["n_frames"]
-        max_w = max(1, n - self.frame_window)
-        # 均匀分布窗口索引
-        if wi * self.stride < max_w:
-            start = wi * self.stride
-        else:
-            start = wi % (max_w // self.stride + 1) * self.stride
-        if start + self.frame_window > n:
-            start = max(0, n - self.frame_window)
-        return v, start
-
     def __getitem__(self, idx):
         if self.train:
             if self.fixed_windows is not None:
