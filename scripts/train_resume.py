@@ -258,6 +258,9 @@ def evaluate(model, loader, cfg, device, criterion=None, class_names=None, thres
     probs, labels = [], []
     loss_acc = None
     tag = getattr(loader, "_eval_tag", "eval")
+    # background 类索引 (不硬编码为末类: OFT 的 background=0, openfield=末类)
+    bg_idx = (class_names.index("background") if class_names and "background" in class_names
+              else (len(class_names) - 1 if class_names else None))
     n_samples = len(loader.dataset) if hasattr(loader, "dataset") else "?"
     total_batches = max(1, len(loader))
     pbar = tqdm(loader, desc=f"[{tag}] evaluating ({n_samples} samples)", leave=True)
@@ -303,12 +306,12 @@ def evaluate(model, loader, cfg, device, criterion=None, class_names=None, thres
     if class_names is not None:
         if thresholds is None:
             # 无外部阈值时在本数据集上调优 (仅作参考上限, 不应用于模型选择)
-            used_thresholds, _ = evaluate_thresholds(Y, P, class_names, bg_idx=len(class_names) - 1)
+            used_thresholds, _ = evaluate_thresholds(Y, P, class_names, bg_idx=bg_idx)
             thr_label = "调优阈值"
         else:
             thr_label = "外部固定阈值"
         pred = threshold_predict(P, used_thresholds, class_names)
-        pred = compute_background(pred, bg_idx=len(class_names) - 1)
+        pred = compute_background(pred, bg_idx=bg_idx)
         eye = (Y[:, None] == np.arange(len(class_names))).astype(int)
         per_class = binary_class_metrics(eye, pred, class_names)
         # 详细记录: 每类阈值 + 样本数
@@ -398,6 +401,9 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
         grad_l2_sum = 0.0; grad_max_sum = 0.0; grad_nan_sum = 0; n_steps = 0
         tr_tp = np.zeros(num_classes); tr_fp = np.zeros(num_classes)
         tr_fn = np.zeros(num_classes); tr_tn = np.zeros(num_classes); tr_n = 0
+        # background 类索引 (不硬编码末类: OFT 的 background=0)
+        bg_idx = (class_names.index("background") if class_names and "background" in class_names
+                  else (num_classes - 1 if class_names else None))
         # 累计训练集概率 (epoch 末用于调阈值, 避免验证集自调过拟合)
         tr_all_probs = []; tr_all_labels = []
         pbar = tqdm(tr_ld, desc=f"[{tag}] ep{epoch+1}/{epochs} lr={lr_cur:.1e}", leave=False)
@@ -484,7 +490,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
         # ---- 用训练集概率调阈值 (避免在验证集自调导致过拟合) ----
         tr_P = np.concatenate(tr_all_probs)
         tr_Y = np.concatenate(tr_all_labels)
-        train_thresholds, _ = evaluate_thresholds(tr_Y, tr_P, class_names, bg_idx=num_classes - 1)
+        train_thresholds, _ = evaluate_thresholds(tr_Y, tr_P, class_names, bg_idx=bg_idx)
         thr_str = ", ".join(f"{c}={train_thresholds.get(c, 0.5):.3f}" for c in class_names)
         print(f"[{tag}] ep{epoch+1}/{epochs} 训练集调优阈值: {thr_str}", flush=True)
 
@@ -498,7 +504,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
             P = smooth_probabilities(P, int(cfg["POSTPROCESS"].get("smooth_window", 3)))
             # 时序平滑后仍用训练集阈值
             pred = threshold_predict(P, train_thresholds, class_names)
-            pred = compute_background(pred, bg_idx=num_classes - 1)
+            pred = compute_background(pred, bg_idx=bg_idx)
             eye = (Y[:, None] == np.arange(num_classes)).astype(int)
             per_class = binary_class_metrics(eye, pred, class_names)
         val_f1m = f1_macro_from(per_class, class_names)
