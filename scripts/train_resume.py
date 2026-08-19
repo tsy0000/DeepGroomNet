@@ -571,9 +571,16 @@ def make_criterion(cfg, num_classes, pw, device):
 
 def load_weights(model, path, device):
     ck = torch.load(path, map_location=device, weights_only=False)
-    model.load_state_dict(ck["model_state"], strict=False)
+    sd = ck["model_state"]
+    cur = model.state_dict()
+    # 只加载"键存在且形状一致"的权重, 跳过 head/aux_head 类别数不同(4<->5)等不匹配键
+    # (load_state_dict 即使 strict=False 对形状不匹配仍会报错)
+    new = {k: v for k, v in sd.items() if k in cur and cur[k].shape == v.shape}
+    model.load_state_dict(new, strict=False)
+    n_skip = len(sd) - len(new)
     print(f"[resume] 加载 {os.path.basename(path)} (epoch={ck.get('epoch','?')} "
-          f"stage={ck.get('stage','?')})", flush=True)
+          f"stage={ck.get('stage','?')}) 兼容 {len(new)}/{len(sd)} 参数, 跳过 {n_skip} (类别数/形状不匹配)",
+          flush=True)
     return model
 
 
