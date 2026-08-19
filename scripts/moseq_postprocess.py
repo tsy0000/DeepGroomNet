@@ -15,6 +15,11 @@
 import os, sys, json, time
 import numpy as np
 
+# 拟合中途绝不弹图 (headless)
+os.environ.setdefault("MPLBACKEND", "Agg")
+import matplotlib
+matplotlib.use("Agg")
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -25,7 +30,13 @@ def main():
     video = os.path.basename(sys.argv[1])
     kp_csv = sys.argv[2]
     out_dir = sys.argv[3]
+    # ============ [调节 1] kappa (时间尺度刚度): 越小音节越碎, 越大音节越长 ============
+    #   命令行第 4 个参数, 默认 1e6 (notebook 最终模型用 kappa=1e6)。
+    #   notebook 的 kappa 扫描: kappas = np.logspace(3,7,5), 见 keypoint-moseq.ipynb cell 6。
     kappa = float(sys.argv[4]) if len(sys.argv) > 4 else 1e6
+    # ============ [调节 2] latent_dim (PCA 成分数): 解释 >=90% 方差的成分数 ============
+    #   命令行第 5 个参数; 缺省自动按 explained_variance_ratio_ 累计>=0.9 计算。
+    #   notebook 用 update_config(project_dir, latent_dim=13) 手动设, 见 cell 8。
     latent_dim = int(sys.argv[5]) if len(sys.argv) > 5 else None
     os.makedirs(out_dir, exist_ok=True)
 

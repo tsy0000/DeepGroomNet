@@ -261,25 +261,43 @@ DLC_ENV_PY = r"D:\Anaconda3\envs\deeplabcut\python.exe"
 MOSSEQ_ENV_PY = r"D:\Anaconda3\envs\keypoint_moseq\python.exe"
 
 
-def run_moseq_fit(keypoint_dir, kappa=1e5):
+def run_moseq_fit(video_path, keypoint_dir, kappa=1e6, latent_dim=None):
     """现场运行 Keypoint-MoSeq 拟合 (镜像 notebook: PCA -> AR-HMM -> 提取音节)。
 
-    通过子进程调用 keypoint_moseq 环境。返回 {video_name: syllable_array}。
+    通过子进程调用 keypoint_moseq 环境 (scripts/moseq_postprocess.py, Agg 不弹图)。
+    kappa: 音节时间尺度刚度; latent_dim: PCA 成分数 (None=自动按90%方差)。
+    返回 {video_name: syllable_array}。
     """
     out_dir = os.path.join(tempfile.gettempdir(), "moseq_fit_out")
     os.makedirs(out_dir, exist_ok=True)
-    script = os.path.join(PROJECT_ROOT, "scripts", "moseq_fit_inference.py")
-    result = subprocess.run([MOSSEQ_ENV_PY, script, keypoint_dir, out_dir, str(kappa)],
-                            capture_output=True, text=True, timeout=3600)
+    script = os.path.join(PROJECT_ROOT, "scripts", "moseq_postprocess.py")
+    base = os.path.splitext(os.path.basename(video_path))[0]
+    # 找该视频的关键点文件 (DLC SuperAnimal 输出的 after_adapt csv / h5)
+    kp_file = None
+    for pattern in (f"{base}*.csv", f"{base}*.h5"):
+        for cand in glob.glob(os.path.join(keypoint_dir, "**", pattern), recursive=True):
+            kp_file = cand; break
+        if kp_file:
+            break
+    if kp_file is None:
+        st.error(f"未找到 {base} 的关键点文件, 请先运行关键点检测")
+        logger.error(f"no keypoint file for {base} in {keypoint_dir}")
+        return {}
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"   # 拟合中途绝不弹图
+    args = [MOSSEQ_ENV_PY, script, video_path, kp_file, out_dir, str(kappa)]
+    if latent_dim:
+        args.append(str(latent_dim))
+    with st.spinner("Running Keypoint-MoSeq fit (PCA + AR-HMM, Agg 无图)... may take minutes"):
+        result = subprocess.run(args, capture_output=True, text=True, timeout=7200, env=env)
     if result.returncode != 0:
         st.error(f"Keypoint-MoSeq fit failed: {result.stderr[-800:]}")
         logger.error(f"moseq fit error: {result.stderr[-800:]}")
         return {}
-    syllables = {}
-    for npy in glob.glob(os.path.join(out_dir, "*.syllable.npy")):
-        name = os.path.basename(npy).replace(".syllable.npy", "")
-        syllables[name] = np.load(npy)
-    return syllables
+    syl_file = os.path.join(out_dir, f"{base}_syllable.npy")
+    if not os.path.exists(syl_file):
+        return {}
+    return {base: np.load(syl_file)}
 
 
 def apply_syllable_boundaries_to_results(frame_results, syllables, video_basename):
@@ -507,11 +525,24 @@ def main():
         st.session_state.tadaconv_path = os.path.join(PROJECT_ROOT, "outputs", "checkpoints", "lpft_best.pt")
     if 'yolo_path' not in st.session_state:
         st.session_state.yolo_path = r"C:\Users\WIN10\PycharmProjects\mouseaction\DeepBehavior\runs\detect\train\weights\best.pt"
+    if 'moseq_kappa' not in st.session_state:
+        st.session_state.moseq_kappa = 1e6
+    if 'moseq_latent_dim' not in st.session_state:
+        st.session_state.moseq_latent_dim = None
 
     with st.sidebar:
         st.markdown("## ⚙️ Model Configuration")
         st.session_state.tadaconv_path = st.text_input("TAdaConv Weight Path", value=st.session_state.tadaconv_path, key="tadaconv_input")
         st.session_state.yolo_path = st.text_input("YOLO Weight Path", value=st.session_state.yolo_path, key="yolo_input")
+        st.markdown("---")
+        st.markdown("## 🧬 Keypoint-MoSeq 参数")
+        st.session_state.moseq_kappa = st.number_input("MoSeq kappa (时间尺度刚度)", min_value=1e2, max_value=1e7,
+                                                       value=float(st.session_state.moseq_kappa), key="moseq_kappa_input",
+                                                       step=1e4, format="%.0f")
+        st.session_state.moseq_latent_dim = st.number_input("PCA 成分数 (0=自动90%方差)", min_value=0,
+                                                            value=int(st.session_state.moseq_latent_dim or 0),
+                                                            key="moseq_dim_input")
+        st.session_state.moseq_latent_dim = st.session_state.moseq_latent_dim or None
         st.markdown("---")
         st.markdown("## 📊 Behavior Classes")
         for c in CLASS_NAMES:
@@ -650,9 +681,11 @@ def main():
                         # 音节分界: 现场跑 Keypoint-MoSeq 拟合 -> 音节边界 -> 段内主导行为
                         st.markdown("#### 🧬 Keypoint-MoSeq Syllable Boundary")
                         if st.session_state.dlc_data is not None and os.path.exists(MOSSEQ_ENV_PY):
-                            with st.spinner("Running Keypoint-MoSeq fit (PCA + AR-HMM)... may take minutes"):
-                                kp_dir = os.path.join(tempfile.gettempdir(), "dlc_keypoints")
-                                syllables = run_moseq_fit(kp_dir)
+                            kp_dir = os.path.join(tempfile.gettempdir(), "dlc_keypoints")
+                            syllables = run_moseq_fit(
+                                st.session_state.temp_video_path, kp_dir,
+                                kappa=st.session_state.moseq_kappa,
+                                latent_dim=st.session_state.moseq_latent_dim)
                             if syllables:
                                 base = os.path.splitext(os.path.basename(st.session_state.temp_video_path))[0]
                                 st.session_state.frame_results = apply_syllable_boundaries_to_results(
