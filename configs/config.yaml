@@ -10,12 +10,15 @@
 # ============================================================
 
 DATA:
-  # 官方 DeepEthogram 集 (20 只) + 自采 (34 只), 逐帧 one-hot 标签
+  # 正式训练仅用 DeepEthogram 官方集 (downloaddatasets, 20只)。
+  # datasetssap3 已完全排除(不参与 train/val/test), 仅作训后 sanity check 用;
+  # 外部泛化测试集 = datasetsopto。
   openfield_roots:
     - "E:/tsy/downloaddatasets"
-    - "E:/tsy/datasetssap3"
   clip_output_root: "D:/DeepGroomNet_v3/outputs/clips"
   meta_root: "D:/DeepGroomNet_v3/outputs/meta"
+  # 训后 sanity check (不进训练): datasetssap3 小鼠视频
+  sap3_sanity_root: "E:/tsy/datasetssap3"
   # 外部泛化测试集 (仅评估, 不训练): 7 类标签, Defecate/Jump 不纳入(归 background)
   opto_test_root: "E:/tsy/datasetsopto"
   # OFT 预训练数据 (Sturman-OFT, 4类: Supported/Unsupported/Grooming/Jumping)

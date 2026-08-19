@@ -73,7 +73,11 @@ def build_from_root(root, source):
 
 
 def main():
-    roots = ["E:/tsy/downloaddatasets", "E:/tsy/datasetssap3"]
+    import yaml
+    with open(os.path.join(ROOT, "configs", "config.yaml"), encoding="utf-8") as f:
+        _cfg = yaml.safe_load(f)
+    # 从 config 读取正式训练数据根 (datasetssap3 已排除, 仅 downloaddatasets)
+    roots = list(_cfg["DATA"]["openfield_roots"])
     out_dir = os.path.join(ROOT, "outputs", "meta")
     os.makedirs(out_dir, exist_ok=True)
 
