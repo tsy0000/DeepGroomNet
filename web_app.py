@@ -34,9 +34,6 @@ from models.tadaconv_model import TAdaConvModel
 os.environ['YOLO_SETTINGS_DIR'] = tempfile.gettempdir()
 from ultralytics import YOLO
 
-st.set_page_config(page_title="Mouse Behavior Prediction System", page_icon="🐭",
-                   layout="wide", initial_sidebar_state="expanded")
-
 # ============================================================ GLOBAL STYLING
 def apply_global_styling():
     st.markdown("""
@@ -56,8 +53,6 @@ def apply_global_styling():
         .block-container { padding-top: 1.5rem; }
     </style>
     """, unsafe_allow_html=True)
-
-apply_global_styling()
 
 # ============================================================ CONSTANTS
 CLASS_NAMES = ['Locomote', 'Rear', 'FaceGroom', 'BodyGroom', 'background']
@@ -89,7 +84,7 @@ def setup_logging():
         logger.addHandler(fh)
     return logger
 
-logger = setup_logging()
+logger = None  # 惰性初始化在 main() 内 (避免模块导入时 bare-mode ScriptRunContext 警告)
 
 # ============================================================ DLC KEYPOINTS
 def load_dlc_h5(h5_path):
@@ -491,6 +486,14 @@ def apply_syllable_smoothing(frame_results, moseq_segments):
 
 # ============================================================ UI
 def main():
+    global logger
+    # 必须在任何其他 st.* 之前调用
+    st.set_page_config(page_title="Mouse Behavior Prediction System", page_icon="🐭",
+                       layout="wide", initial_sidebar_state="expanded")
+    apply_global_styling()
+    if logger is None:
+        logger = setup_logging()
+
     st.markdown("""
     <div id="super-title-container"><div id="super-title">🐭 Mouse Behavior Prediction System</div></div>
     """, unsafe_allow_html=True)
