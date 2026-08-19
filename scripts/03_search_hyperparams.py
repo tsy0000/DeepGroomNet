@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader
 
 from data.dataset import FrameLevelDataset, make_pos_weight_from_videos
 from losses.classification import FocalLossBCE, L2SPRegularizer
-from scripts.train import build_model, cosine_with_warmup, make_optimizer
+from scripts.train_resume import build_model, cosine_with_warmup, make_optimizer
 
 try:
     import optuna
@@ -69,7 +69,7 @@ def run_trial(cfg, params, device):
     make_optimizer(model, params["lp_lr"], 1.0, params["weight_decay"])
     # 用短 LP 找到 head, 再 LP-FT
     epochs = max(2, int(params["epochs"]) // 3)
-    from scripts.train import train_stage
+    from scripts.train_resume import train_stage
     model.unfreeze_all()
     opt = make_optimizer(model, params["lr"], params["head_lr_mult"], params["weight_decay"])
     best = 0.0

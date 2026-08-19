@@ -20,7 +20,7 @@ sys.path.insert(0, ROOT)
 
 from data.dataset import FrameLevelDataset, make_pos_weight_from_videos
 from losses.classification import FocalLossBCE, L2SPRegularizer
-from scripts.train import build_model
+from scripts.train_resume import build_model
 
 
 def main():

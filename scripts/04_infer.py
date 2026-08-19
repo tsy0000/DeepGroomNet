@@ -28,7 +28,7 @@ from postprocess.thresholds import (evaluate_thresholds, threshold_predict,
                                     compute_background, min_bout_per_behavior,
                                     smooth_probabilities, bout_stats,
                                     syllable_boundaries, moseq_boundary_refine)
-from scripts.train import build_model
+from scripts.train_resume import build_model
 
 
 @torch.no_grad()
@@ -183,7 +183,7 @@ def main():
 
     # 在 test 上的指标 (若有真值)
     eye = (true_all[:, None] == np.arange(num_classes)).astype(int)
-    from scripts.train import binary_class_metrics, f1_macro_from
+    from scripts.train_resume import binary_class_metrics, f1_macro_from
     tpc = binary_class_metrics(eye, pred_all, class_names)
     print(f"[{args.split}] F1_macro={f1_macro_from(tpc, class_names):.2f}")
     print(f"[{args.split}] {'行为':<12}{'Acc':>7}{'F1':>7}{'Recall':>8}{'Precision':>10}")

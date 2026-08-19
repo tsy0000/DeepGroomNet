@@ -20,7 +20,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, ROOT)
 
 from data.dataset import FrameLevelDataset
-from scripts.train import build_model
+from scripts.train_resume import build_model
 
 
 def extract_features(model, loader, device):
