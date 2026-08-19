@@ -1,21 +1,28 @@
-"""Keypoint-MoSeq 后处理: 按 keypoint-moseq.ipynb 流程对单个视频拟合, 输出逐帧音节。
+"""Keypoint-MoSeq postprocessing: fit a single video and export per-frame syllables.
 
-镜像 notebook:
-  load_keypoints -> format_data(use_bodyparts/fps/anterior/posterior)
-  -> fit_pca -> print_dims_to_explain_variance(pca,0.9) [= latent_dim]
-  -> init_model -> update_hypparams(kappa) -> fit_model(ar_only) -> fit_model(full)
-  -> extract_results -> 逐帧 syllable
+Follows keypoint-moseq.readthedocs.io "Model fitting":
+  - Setting kappa              -> update_hypparams(model, kappa=...)
+  - Initialization             -> init_model
+  - Fitting an AR-HMM          -> fit_model(ar_only=True)
+  - Fitting the full model     -> fit_model(ar_only=False)
+  - Sort syllables by frequency-> reindex_syllables_in_checkpoint
+  - Extract model results      -> extract_results
 
-用法(keypoint_moseq 环境):
+Run with the keypoint_moseq conda environment. No plots are shown (Agg).
+
+Usage:
   D:/Anaconda3/envs/keypoint_moseq/python.exe scripts/moseq_postprocess.py \
       <video> <keypoint_csv> <out_dir> [kappa] [latent_dim]
 
-输出: out_dir/<video>_syllable.npy (逐帧音节) + 打印 PCA 维度。
+Output: <out_dir>/<video>_syllable.npy
 """
-import os, sys, json, time
+import os
+import sys
+import time
+
 import numpy as np
 
-# 拟合中途绝不弹图 (headless)
+# Headless: never pop up plots mid-fit
 os.environ.setdefault("MPLBACKEND", "Agg")
 import matplotlib
 matplotlib.use("Agg")
@@ -30,13 +37,12 @@ def main():
     video = os.path.basename(sys.argv[1])
     kp_csv = sys.argv[2]
     out_dir = sys.argv[3]
-    # ============ [调节 1] kappa (时间尺度刚度): 越小音节越碎, 越大音节越长 ============
-    #   命令行第 4 个参数, 默认 1e6 (notebook 最终模型用 kappa=1e6)。
-    #   notebook 的 kappa 扫描: kappas = np.logspace(3,7,5), 见 keypoint-moseq.ipynb cell 6。
+    # [Tune 1] kappa: AR-HMM stiffness (syllable time scale). Lower=more/finer
+    # syllables, higher=longer/coarser. Default 1e6. Kappa scan:
+    # kappas = np.logspace(3,7,5)  (keypoint-moseq.ipynb cell 6).
     kappa = float(sys.argv[4]) if len(sys.argv) > 4 else 1e6
-    # ============ [调节 2] latent_dim (PCA 成分数): 解释 >=90% 方差的成分数 ============
-    #   命令行第 5 个参数; 缺省自动按 explained_variance_ratio_ 累计>=0.9 计算。
-    #   notebook 用 update_config(project_dir, latent_dim=13) 手动设, 见 cell 8。
+    # [Tune 2] latent_dim: PCA components (>=90% variance). Auto-computed from
+    # explained_variance_ratio_ if not given. Manual: latent_dim=13 (notebook cell 8).
     latent_dim = int(sys.argv[5]) if len(sys.argv) > 5 else None
     os.makedirs(out_dir, exist_ok=True)
 
@@ -45,10 +51,10 @@ def main():
     project_dir = os.path.join(out_dir, f"moseq_proj_{os.path.splitext(video)[0]}")
     os.makedirs(project_dir, exist_ok=True)
 
-    # ---- notebook cell 2: 建项目 (需先 setup_project 才存在 config.yml) ----
+    # notebook cell 2: create the project (needed before update_config)
     kpms.setup_project(project_dir, deeplabcut_config=r"E:/tsy/config.yaml", overwrite=True)
 
-    # ---- notebook cell 3: 配置 (use_bodyparts 与 notebook 一致) ----
+    # notebook cell 3: bodyparts / fps config
     use_bodyparts = [
         "nose", "left_ear", "right_ear", "left_ear_tip", "right_ear_tip",
         "left_eye", "right_eye", "neck", "mid_back", "mouse_center",
@@ -65,12 +71,12 @@ def main():
         fps=30,
     )
 
-    # ---- notebook cell 4: 加载关键点 + 格式化 ----
+    # notebook cell 4: load keypoints + format
     coordinates, confidences, bodyparts = kpms.load_keypoints(kp_csv, "deeplabcut")
     cfg = lambda: kpms.load_config(project_dir)
     data, metadata = kpms.format_data(coordinates, confidences, **cfg())
 
-    # ---- notebook cell 5: PCA (找 90% 方差的 latent_dim) ----
+    # notebook cell 5: PCA -> latent_dim for >=90% variance
     pca = kpms.fit_pca(**data, **cfg())
     kpms.save_pca(pca, project_dir)
     if latent_dim is None:
@@ -79,7 +85,7 @@ def main():
         print(f"[moseq] >=90% variance explained by {latent_dim} components", flush=True)
     kpms.update_config(project_dir, latent_dim=latent_dim)
 
-    # ---- notebook cell 9/10/11: 拟合 AR-HMM ----
+    # notebook cell 9/10/11: init + set kappa + fit AR-only then full model
     model = kpms.init_model(data, pca=pca, **cfg())
     model = kpms.update_hypparams(model, kappa=kappa)
     model_name = f"post_k{int(kappa)}_d{latent_dim}"
@@ -94,14 +100,21 @@ def main():
                            num_iters=num_ar + num_full)[0]
     print(f"[moseq] fit done in {time.time()-t0:.0f}s", flush=True)
 
-    # ---- notebook cell 13/15: 提取逐帧音节并保存 ----
+    # notebook cell 12: sort syllables by frequency
+    try:
+        kpms.reindex_syllables_in_checkpoint(project_dir, model_name)
+        print("[moseq] syllables reindexed by frequency", flush=True)
+    except Exception as e:
+        print(f"[moseq] reindex skipped: {e}", flush=True)
+
+    # notebook cell 13/15: extract per-frame syllables and save
     results = kpms.extract_results(model, metadata, project_dir, model_name)
     for key, r in results.items():
         syl = np.asarray(r["syllable"])
         out = os.path.join(out_dir, f"{os.path.splitext(video)[0]}_syllable.npy")
         np.save(out, syl)
         n_syl = int(syl.max()) + 1
-        print(f"[moseq] saved {out}: {len(syl)} frames, {n_syl} syllables")
+        print(f"[moseq] saved {out}: {len(syl)} frames, {n_syl} syllables", flush=True)
     print(f"[moseq] DONE project={project_dir}")
 
 
