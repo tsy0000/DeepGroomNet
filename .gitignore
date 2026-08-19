@@ -5,13 +5,8 @@ weights/*.pt
 data/*.mp4
 data/*.csv
 
-# ---- Run artifacts ----
-outputs/checkpoints/
-outputs/logs/
-outputs/metrics/
-outputs/search/
-outputs/predictions/
-outputs/clips/
+# ---- Run artifacts (generated, not tracked) ----
+outputs/
 
 # ---- Python ----
 __pycache__/
@@ -28,7 +23,3 @@ Thumbs.db
 # ---- Env ----
 .env
 env/
-
-# ---- Run artifacts (not tracked) ----
-outputs/*.log
-outputs/metrics_smoke_*/
