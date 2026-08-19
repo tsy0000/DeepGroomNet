@@ -510,12 +510,17 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
             eye = (Y[:, None] == np.arange(num_classes)).astype(int)
             per_class = binary_class_metrics(eye, pred, class_names)
         val_f1m = f1_macro_from(per_class, class_names)
-        # DeepEthogram 官方选模型指标: 去 background 的类平均 F1 (mean F1 nobg)
+        # DeepEthogram 官方上报指标 (eLife): overall accuracy + macro-F1(全类) + macro-AUROC
+        #   - overall accuracy: 逐帧 argmax 命中率 (DeepEthogram 报总体acc, 不报每类acc)
+        val_overall_acc = float((P.argmax(axis=1) == Y).mean())
+        #   - F1 = sklearn f1_score(average='macro'): 全类(含background) macro 平均
+        #   - AUROC = 逐类 AUROC 取平均 (macro AUROC)
+        val_auroc = macro_auroc(P, Y, class_names)
+        # 仅内部选模型/调参用 (DeepEthogram HPO 目标), 不作为上报核心结果:
+        #   mean F1 over non-background classes
         val_f1m_nobg = float(np.mean(
             [per_class[c]["f1"] for c in class_names[:-1]])) if len(class_names) > 1 else val_f1m
-        # 阈值无关的 AUROC (模型选择首选, 避免阈值过拟合验证集)
-        val_auroc = macro_auroc(P, Y, class_names)
-        # select_metric: auroc(推荐, 阈值无关) / f1_nobg / f1 / auprc
+        # select_metric: auroc(默认, DeepEthogram 也用 macro-AUROC, 阈值无关不过拟合) / f1_nobg / f1 / auprc
         sel = cfg["TRAIN"].get("select_metric", "auroc")
         if sel == "auprc":
             sel_metric = macro_auprc(P, Y, class_names)
@@ -531,12 +536,13 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
                      val_loss_components=val_loss_dict,
                      tr_per_class=tr_per_class, tr_f1m=tr_f1m)
 
-        # ---- 每 epoch 结束后逐类 acc/f1/recall/precision + 梯度汇总 ----
-        print(f"\n[{tag}] ep{epoch+1}/{epochs} | TRAIN loss={tr_loss:.3f} f1_macro={tr_f1m:.2f} "
+        # ---- 每 epoch 结束后: DeepEthogram 官方指标 (overall acc + 全类macro-F1 + macro-AUROC) ----
+        print(f"\n[{tag}] ep{epoch+1}/{epochs} | TRAIN loss={tr_loss:.3f} "
               f"| VAL loss={(val_loss_dict.get('total',0.0) if val_loss_dict else 0.0):.3f} "
-              f"f1_macro={val_f1m:.2f} (nobg={val_f1m_nobg:.2f}) "
-              f"AUROC={val_auroc:.3f} | "
-              f"grad_L2={grad_epoch['grad_l2']:.1e} grad_max={grad_epoch['grad_max']:.1e} "
+              f"overall_acc={val_overall_acc*100:.1f}% "
+              f"F1_macro(全类)={val_f1m:.2f} AUROC(macro)={val_auroc:.3f} "
+              f"[选择目标]={sel}={sel_metric:.3f} "
+              f"| grad_L2={grad_epoch['grad_l2']:.1e} grad_max={grad_epoch['grad_max']:.1e} "
               f"grad_NaN={grad_epoch['grad_nan']}", flush=True)
         print(f"[{tag}] TRAIN {'Class':<12}{'Acc':>7}{'F1':>7}{'Recall':>8}{'Precision':>10}", flush=True)
         for c in class_names:

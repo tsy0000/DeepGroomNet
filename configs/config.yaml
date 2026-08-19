@@ -85,8 +85,11 @@ TRAIN:
   warmup_epochs: 5
   lr_schedule: cosine
   early_stop_patience: 12
-  # 早停/选模型指标 (官方 DeepEthogram: 去 background 的类平均 F1) / auroc / auprc / f1
-  select_metric: f1_nobg
+  # 上报指标对齐 DeepEthogram 官方 (eLife): overall accuracy + 全类macro-F1 + macro-AUROC
+  # 选模型/调参目标 (DeepEthogram 内部用 non-background 的 mean F1, 或宏AUROC):
+  #   auroc(推荐, 阈值无关不过拟合验证集) / f1_nobg(DeepEthogram调参目标) / f1 / auprc
+  # 阈值在训练集上调, 验证集用固定阈值评估, 避免验证集自调阈值过拟合
+  select_metric: auroc
   mixed_precision: false      # fp32 (之前 fp16 溢出死锁教训)
   num_workers: 4
   clips_per_video: 60         # 每视频每 epoch 抽取 clip 数 (34视频×60=2040 sample/epoch)
