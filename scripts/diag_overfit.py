@@ -19,7 +19,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, ROOT)
 
 from data.dataset import FrameLevelDataset, make_pos_weight_from_videos
-from losses.classification import FocalLossBCE, L2SPRegularizer
+from losses.auxiliary import FocalBCE
 from scripts.train_resume import build_model
 
 
@@ -49,9 +49,8 @@ def main():
     model = build_model(cfg, num_classes).to(device)
     model.set_head(num_classes, class_counts=cc)
     model.unfreeze_all()   # 全解冻, 测架构最大学习能力
-    criterion = FocalLossBCE(pos_weight=pw.to(device), label_smoothing=0.05,
-                                exclusive_weight=float(cfg["LOSS"].get("binary_exclusivity_weight", 0.0)))
-    l2sp = L2SPRegularizer(model, alpha=0, beta=0)   # 过拟合测试关 L2-SP, 只看记忆能力
+    criterion = FocalBCE(gamma=float(cfg["LOSS"].get("binary_gamma", 1.0)),
+                         pos_weight=pw.to(device))
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.0)
 
     print("\n=== 过拟合测试 (结构能否记忆小样本) ===")

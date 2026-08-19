@@ -1,10 +1,10 @@
-"""losses 包: 行为分类损失 (自研命名).
+"""losses 包: DeepEthogram 官方多标签行为分类损失.
 
-- classification.FocalLossBCE / L2SPRegularizer: 多标签分类损失
-- auxiliary.ConditionalLoss / AuxFocalLoss: CPAM 条件自适应损失 (式8-10)
+- auxiliary.FocalBCE: weighted binary focal loss (γ=1, pos_weight=(neg/pos)^0.25)
+- auxiliary.ConditionalLoss: CPAM 条件自适应加权 (论文式8-10, α=0.9, β=0.1)
+- auxiliary.L2SPRegularizer: L2-SP 向预训练权重衰减
+- auxiliary.AuxFocalLoss: 主头 Focal + CPAM 条件辅助 + L2-SP 组合损失
 """
-from .classification import FocalLossBCE, L2SPRegularizer, ClassificationLoss, build_loss
-from .auxiliary import ConditionalLoss, AuxFocalLoss, FocalBCE
+from .auxiliary import ConditionalLoss, AuxFocalLoss, FocalBCE, L2SPRegularizer
 
-__all__ = ["FocalLossBCE", "L2SPRegularizer", "ClassificationLoss", "build_loss",
-           "ConditionalLoss", "AuxFocalLoss", "FocalBCE"]
+__all__ = ["ConditionalLoss", "AuxFocalLoss", "FocalBCE", "L2SPRegularizer"]

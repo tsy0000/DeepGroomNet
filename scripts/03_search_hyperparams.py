@@ -20,7 +20,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from data.dataset import FrameLevelDataset, make_pos_weight_from_videos
-from losses.classification import FocalLossBCE, L2SPRegularizer
+from losses.auxiliary import FocalBCE, L2SPRegularizer
 from scripts.train_resume import build_model, cosine_with_warmup, make_optimizer
 
 try:
@@ -58,12 +58,11 @@ def run_trial(cfg, params, device):
     tr_ld, va_ld, pw = build_dataloaders(cfg, class_names, frame_window,
                                          bs, nw)
     model = build_model(cfg, num_classes).to(device)
-    criterion = FocalLossBCE(
+    criterion = FocalBCE(
+        gamma=float(cfg["LOSS"].get("binary_gamma", 1.0)),
         pos_weight=pw.to(device),
-        gamma=0.0,
-        label_smoothing=float(cfg["LOSS"].get("binary_label_smoothing", 0.05)),
     )
-    l2sp = L2SPRegularizer(model, alpha=1e-5, beta=1e-3)
+    l2sp = L2SPRegularizer(weight=float(cfg["TRAIN"].get("l2sp_weight", 1e-3)))
     # 搜索阶段直接全量训 (LP-FT) 少量 epoch
     model.freeze_backbone()
     make_optimizer(model, params["lp_lr"], 1.0, params["weight_decay"])

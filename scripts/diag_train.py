@@ -20,7 +20,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, ROOT)
 
 from data.dataset import FrameLevelDataset, make_pos_weight_from_videos
-from losses.classification import FocalLossBCE, L2SPRegularizer
+from losses.auxiliary import FocalBCE
 from scripts.train_resume import build_model, cosine_with_warmup
 
 
@@ -53,8 +53,8 @@ def main():
     chance_acc_majority = float(pi.max())
     chance_loss = 0.0
     eps = 1e-7
-    # 随机模型(每类 sigmoid=prior) 的加权 BCE 期望损失(含 label smoothing)
-    ls = float(cfg["LOSS"].get("binary_label_smoothing", 0.05)) * 2
+    # 随机模型(每类 sigmoid=prior) 的加权 BCE 期望损失 (DeepEthogram, 无 label smoothing)
+    ls = 0.0
     for c in range(num_classes):
         p = float(pi[c]); pwv = float(pw[c])
         sig = np.clip(p, eps, 1 - eps)
@@ -70,9 +70,8 @@ def main():
     model.freeze_backbone()
     opt = torch.optim.AdamW([p for n, p in model.named_parameters() if p.requires_grad],
                             lr=5e-4, weight_decay=0.02)
-    criterion = FocalLossBCE(pos_weight=pw.to(device), label_smoothing=0.05,
-                                exclusive_pairs=cfg["LOSS"].get("binary_exclusivity_pairs"),
-                                exclusive_weight=float(cfg["LOSS"].get("binary_exclusivity_weight", 0.0)))
+    criterion = FocalBCE(gamma=float(cfg["LOSS"].get("binary_gamma", 1.0)),
+                          pos_weight=pw.to(device))
 
     print("\n=== 前向 + 梯度诊断 ===")
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

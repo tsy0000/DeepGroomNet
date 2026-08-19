@@ -64,14 +64,12 @@ LOSS:
   head_mode: multilabel       # 多标签 sigmoid (DeepEthogram)
   # 类别不平衡(极不平衡: FG 4.3% / BG 1.9%)的成熟做法, 三管齐下:
   #   1) focal loss (Lin ICCV17, 降低易分负样本权重)   -> binary_gamma>0
+  #      DeepEthogram 官方用 gamma=1
   #   2) pos_weight=(neg/pos)^0.25 (DeepEthogram 官方) -> binary_alpha_power
   #   3) 稀有类偏置初始化 (DeepEthogram rare_class_bias) -> rare_class_bias_init
-  binary_gamma: 0.5
-  binary_label_smoothing: 0.05
+  binary_gamma: 1.0
   binary_alpha_mode: deepethogram
   binary_alpha_power: 0.25
-  binary_exclusivity_pairs: [[2, 3]]   # FG/BG 互斥 (Kalueff 梳理句法)
-  binary_exclusivity_weight: 0.05
   rare_class_bias_init: true
 
 TRAIN:

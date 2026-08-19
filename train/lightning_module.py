@@ -45,11 +45,10 @@ class TAdaConvLightning(pl.LightningModule):
         self.loss_fn = AuxFocalLoss(
             num_classes=num_classes,
             pos_weight=pos_weight,
-            gamma=float(cfg["LOSS"].get("binary_gamma", 0.5)),
+            gamma=float(cfg["LOSS"].get("binary_gamma", 1.0)),
             alpha=float(m.get("cpam_alpha", 0.9)),
             beta=float(m.get("cpam_beta", 0.1)),
             l2sp_weight=float(cfg["TRAIN"].get("l2sp_weight", 1e-3)),
-            label_smoothing=float(cfg["LOSS"].get("binary_label_smoothing", 0.05)),
         )
         # 预训练加载 (若提供)
         self._load_pretrained(cfg["MODEL"].get("pretrained"))

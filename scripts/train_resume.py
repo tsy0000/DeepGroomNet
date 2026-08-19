@@ -574,13 +574,13 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
 
 
 def make_criterion(cfg, num_classes, pw, device):
+    # DeepEthogram 官方: weighted binary focal (γ=1) + pos_weight=(neg/pos)^0.25
     return AuxFocalLoss(
         num_classes=num_classes, pos_weight=pw.to(device),
-        gamma=float(cfg["LOSS"].get("binary_gamma", 0.5)),
+        gamma=float(cfg["LOSS"].get("binary_gamma", 1.0)),
         alpha=float(cfg["MODEL"].get("cpam_alpha", 0.9)),
         beta=float(cfg["MODEL"].get("cpam_beta", 0.1)),
-        l2sp_weight=float(cfg["TRAIN"].get("l2sp_weight", 0.0)),
-        label_smoothing=float(cfg["LOSS"].get("binary_label_smoothing", 0.05)))
+        l2sp_weight=float(cfg["TRAIN"].get("l2sp_weight", 0.0)))
 
 
 def load_weights(model, path, device):

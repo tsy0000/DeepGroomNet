@@ -115,27 +115,21 @@ class AuxFocalLoss(nn.Module):
         aux_weight (float): 辅助分支是否恒有贡献 (内部条件化).
     """
 
-    def __init__(self, num_classes, pos_weight=None, gamma=0.5,
-                 alpha=0.9, beta=0.1, l2sp_weight=1e-3, label_smoothing=0.05):
+    def __init__(self, num_classes, pos_weight=None, gamma=1.0,
+                 alpha=0.9, beta=0.1, l2sp_weight=1e-3):
         super().__init__()
         self.num_classes = num_classes
+        # DeepEthogram 官方: weighted binary focal (γ=1, pos_weight=(neg/pos)^0.25), 无 label smoothing
         self.focal = FocalBCE(gamma=gamma, pos_weight=pos_weight)
         self.conditional = ConditionalLoss(alpha=alpha, beta=beta)
         self.l2sp = L2SPRegularizer(weight=l2sp_weight)
-        self.label_smoothing = label_smoothing
-
-    def _smooth(self, targets):
-        """label smoothing for multi-label."""
-        if self.label_smoothing > 0:
-            return targets * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
-        return targets
 
     def forward(self, logits, targets, aux_logits=None, model=None):
         """logits: 主头 (N,C); targets: (N,C) one-hot; aux_logits: CPAM 头 or None.
 
         返回 (loss, dict{name: value})。
         """
-        tgt = self._smooth(targets.float())
+        tgt = targets.float()
         lce = self.focal(logits.float(), tgt)
 
         loss_dict = {"L_CE": lce.detach()}

@@ -8,7 +8,7 @@ from train.lightning_module import TAdaConvLightning
 CFG = {
     "MODEL": {"cpam": True, "stsa": True, "cpam_alpha": 0.9, "cpam_beta": 0.1,
               "drop_path": 0.1, "pretrained": ""},
-    "LOSS": {"binary_gamma": 0.5, "binary_label_smoothing": 0.05},
+    "LOSS": {"binary_gamma": 1.0},
     "TRAIN": {"lr": 2e-4, "head_lr_mult": 10.0, "weight_decay": 5e-4,
               "epochs": 60, "l2sp_weight": 0.0},
     "OUTPUT": {"log_dir": "outputs/logs", "checkpoint_dir": "outputs/checkpoints"},
