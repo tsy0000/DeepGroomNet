@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
-"""train2.py - 断电续训 (auto-resume).
+"""train_resume.py - 完整训练管线 + 断电续训 (auto-resume).
 
+完整流程: OFT 预训练 -> LP(冻前3stage训Stage4+head+STSA+CPAM) -> LP-FT(正式5类微调).
 按已存在的 checkpoint 自动跳过已完成的阶段, 从断点继续:
   1. OFT 阶段:  若 outputs/checkpoints/oft_pretrained.pt 存在 -> 跳过, 否则训练.
   2. LP 阶段:   若 lp_best.pt 存在 -> 跳过, 否则训练.
   3. LP-FT 阶段: 取最新的 lpft_epoch_XXX.pt / lpft_best.pt 加载继续; 否则从头训.
 
 用法:
-  D:/Anaconda3/envs/deepgroomnet3/python.exe scripts/train2.py                # 自动续训
-  D:/Anaconda3/envs/deepgroomnet3/python.exe scripts/train2.py --tag smoke     # 续到 smoke 目录
-  D:/Anaconda3/envs/deepgroomnet3/python.exe scripts/train2.py --from-ckpt D:/DeepGroomNet_v3/outputs/checkpoints/lpft_epoch_010.pt --epochs 50
+  D:/Anaconda3/envs/deepgroomnet3/python.exe scripts/train_resume.py                # 自动续训
+  D:/Anaconda3/envs/deepgroomnet3/python.exe scripts/train_resume.py --tag smoke     # 续到 smoke 目录
+  D:/Anaconda3/envs/deepgroomnet3/python.exe scripts/train_resume.py --from-ckpt D:/DeepGroomNet_v3/outputs/checkpoints/lpft_epoch_010.pt --epochs 50
 """
 import os
 import sys

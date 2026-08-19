@@ -243,12 +243,16 @@ def cosine_with_warmup(epoch, epochs, warmup, lr_base):
 
 
 @torch.no_grad()
-def evaluate(model, loader, cfg, device, criterion=None, class_names=None):
-    """多标签评估。返回 (probs, labels, loss_dict, per_class)。
+def evaluate(model, loader, cfg, device, criterion=None, class_names=None, thresholds=None):
+    """多标签评估。返回 (probs, labels, loss_dict, per_class, used_thresholds)。
 
     对齐 DeepEthogram 官方: 输出每类独立 sigmoid 概率 (非 argmax),
     用逐类阈值二值化 (background=valid_bg), 逐类算 acc/f1/recall/precision。
     带 tqdm 进度条 (val/test 在控制台与日志均可见)。
+
+    Args:
+        thresholds: 外部传入的固定阈值 {class: float}。为 None 时在本数据集上
+                    网格搜索最优阈值 (仅用于参考上限, 不应用于模型选择)。
     """
     model.eval()
     probs, labels = [], []
@@ -295,19 +299,25 @@ def evaluate(model, loader, cfg, device, criterion=None, class_names=None):
     print(f"  [{tag}] 评估完成: {len(Y)} 样本, loss={loss_dict.get('total', float('nan')) if loss_dict else float('nan'):.4f}", flush=True)
 
     per_class = None
+    used_thresholds = thresholds
     if class_names is not None:
-        thresholds, _ = evaluate_thresholds(Y, P, class_names, bg_idx=len(class_names) - 1)
-        pred = threshold_predict(P, thresholds, class_names)
+        if thresholds is None:
+            # 无外部阈值时在本数据集上调优 (仅作参考上限, 不应用于模型选择)
+            used_thresholds, _ = evaluate_thresholds(Y, P, class_names, bg_idx=len(class_names) - 1)
+            thr_label = "调优阈值"
+        else:
+            thr_label = "外部固定阈值"
+        pred = threshold_predict(P, used_thresholds, class_names)
         pred = compute_background(pred, bg_idx=len(class_names) - 1)
         eye = (Y[:, None] == np.arange(len(class_names))).astype(int)
         per_class = binary_class_metrics(eye, pred, class_names)
-        # 详细记录: 每类最优阈值 + 样本数
+        # 详细记录: 每类阈值 + 样本数
         cnt = np.bincount(Y.astype(np.int64), minlength=len(class_names))
-        thr_str = ", ".join(f"{c}={thresholds.get(c, 0.5):.3f}" for c in class_names)
+        thr_str = ", ".join(f"{c}={used_thresholds.get(c, 0.5):.3f}" for c in class_names)
         cnt_str = ", ".join(f"{c}={int(cnt[i])}" for i, c in enumerate(class_names))
         print(f"  [{tag}] 每类样本数: {cnt_str}", flush=True)
-        print(f"  [{tag}] 每类最优阈值: {thr_str}", flush=True)
-    return P, Y, loss_dict, per_class
+        print(f"  [{tag}] 每类{thr_label}: {thr_str}", flush=True)
+    return P, Y, loss_dict, per_class, used_thresholds
 
 
 def save_metrics(path, epoch, class_names, per_class, val_f1m, grad_epoch=None,
@@ -387,7 +397,9 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
                               ("L_CE", "L_CPAM", "combined", "L2-SP", "total")}
         grad_l2_sum = 0.0; grad_max_sum = 0.0; grad_nan_sum = 0; n_steps = 0
         tr_tp = np.zeros(num_classes); tr_fp = np.zeros(num_classes)
-        tr_fn = np.zeros(num_classes); tr_n = 0
+        tr_fn = np.zeros(num_classes); tr_tn = np.zeros(num_classes); tr_n = 0
+        # 累计训练集概率 (epoch 末用于调阈值, 避免验证集自调过拟合)
+        tr_all_probs = []; tr_all_labels = []
         pbar = tqdm(tr_ld, desc=f"[{tag}] ep{epoch+1}/{epochs} lr={lr_cur:.1e}", leave=False)
         n_batches_total = max(1, len(tr_ld))
         for bi, (x, y) in enumerate(pbar):
@@ -432,30 +444,32 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
                     tr_loss_components[k] += float(loss_dict[k]) * x.size(0)
             # train 多标签指标: sigmoid probs 按每类阈值 0.5 二值化 (与 val 同口径)
             tr_probs = torch.sigmoid(logits.detach()).cpu().numpy()
+            tr_all_probs.append(tr_probs)
             tr_pred = (tr_probs >= 0.5).astype(int)
             y_np = y.cpu().numpy()
+            tr_all_labels.append(y_np)
             eye = (y_np[:, None] == np.arange(num_classes)).astype(int)
             for i in range(num_classes):
                 t = eye[:, i]; p_ = tr_pred[:, i]
                 tr_tp[i] += int(((t == 1) & (p_ == 1)).sum())
                 tr_fp[i] += int(((t == 0) & (p_ == 1)).sum())
                 tr_fn[i] += int(((t == 1) & (p_ == 0)).sum())
+                tr_tn[i] += int(((t == 0) & (p_ == 0)).sum())
             tr_n += x.size(0)
-            # tqdm 瀹炴椂鏄剧ず
-            tr_acc = tr_tp.sum() / max(1, tr_n)
+            # tqdm 实时显示
+            tr_acc = float(np.mean([(tr_tp[i] + tr_tn[i]) / max(1, tr_n) for i in range(num_classes)]))
             tr_f1s = np.where(tr_tp + tr_fn > 0,
                               2 * tr_tp / (2 * tr_tp + tr_fp + tr_fn + 1e-9), 0.0)
             pbar.set_postfix({"loss": f"{tr_loss/max(1,n_tr):.3f}",
                               "acc": f"{tr_acc*100:.1f}",
                               "f1": f"{tr_f1s.mean()*100:.1f}",
                               "gL2": f"{grad_l2:.1e}"})
-            n_steps += 1
         tr_loss /= max(n_tr, 1)
         for k in tr_loss_components:
             tr_loss_components[k] /= max(n_tr, 1)
-        tr_acc = tr_tp.sum() / max(1, tr_n)
+        tr_acc = float(np.mean([(tr_tp[i] + tr_tn[i]) / max(1, tr_n) for i in range(num_classes)]))
         tr_per_class = {
-            c: {"accuracy": tr_tp[i] / max(1, tr_n) * 100,
+            c: {"accuracy": (tr_tp[i] + tr_tn[i]) / max(1, tr_n) * 100,
                 "precision": tr_tp[i] / max(1e-9, tr_tp[i] + tr_fp[i]) * 100,
                 "recall": tr_tp[i] / max(1e-9, tr_tp[i] + tr_fn[i]) * 100,
                 "f1": 2 * tr_tp[i] / max(1e-9, 2 * tr_tp[i] + tr_fp[i] + tr_fn[i]) * 100}
@@ -467,15 +481,23 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
                       "grad_max": grad_max_sum / max(1, n_steps),
                       "grad_nan": int(grad_nan_sum)}
 
-        # val 评估 (DeepEthogram: 每类阈值网格 + valid_bg + mean F1 nobg; 可加时序平滑)
+        # ---- 用训练集概率调阈值 (避免在验证集自调导致过拟合) ----
+        tr_P = np.concatenate(tr_all_probs)
+        tr_Y = np.concatenate(tr_all_labels)
+        train_thresholds, _ = evaluate_thresholds(tr_Y, tr_P, class_names, bg_idx=num_classes - 1)
+        thr_str = ", ".join(f"{c}={train_thresholds.get(c, 0.5):.3f}" for c in class_names)
+        print(f"[{tag}] ep{epoch+1}/{epochs} 训练集调优阈值: {thr_str}", flush=True)
+
+        # val 评估 (用训练集阈值, 避免验证集自调过拟合)
         print(f"[{tag}] ep{epoch+1}/{epochs} 训练完成, 验证中... (val样本={len(va_ld.dataset)})", flush=True)
         va_ld._eval_tag = f"{tag}/val"
-        P, Y, val_loss_dict, per_class = evaluate(
-            model, va_ld, cfg, device, criterion=criterion, class_names=class_names)
+        P, Y, val_loss_dict, per_class, val_thresholds = evaluate(
+            model, va_ld, cfg, device, criterion=criterion, class_names=class_names,
+            thresholds=train_thresholds)
         if cfg["POSTPROCESS"].get("temporal_smooth", False):
             P = smooth_probabilities(P, int(cfg["POSTPROCESS"].get("smooth_window", 3)))
-            thresholds, _ = evaluate_thresholds(Y, P, class_names, bg_idx=num_classes - 1)
-            pred = threshold_predict(P, thresholds, class_names)
+            # 时序平滑后仍用训练集阈值
+            pred = threshold_predict(P, train_thresholds, class_names)
             pred = compute_background(pred, bg_idx=num_classes - 1)
             eye = (Y[:, None] == np.arange(num_classes)).astype(int)
             per_class = binary_class_metrics(eye, pred, class_names)
@@ -483,18 +505,18 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
         # DeepEthogram 官方选模型指标: 去 background 的类平均 F1 (mean F1 nobg)
         val_f1m_nobg = float(np.mean(
             [per_class[c]["f1"] for c in class_names[:-1]])) if len(class_names) > 1 else val_f1m
-        # 阈值无关的 AUROC (辅助参考)
+        # 阈值无关的 AUROC (模型选择首选, 避免阈值过拟合验证集)
         val_auroc = macro_auroc(P, Y, class_names)
-        # select_metric: f1_nobg(官方) / auroc / auprc / f1
-        sel = cfg["TRAIN"].get("select_metric", "f1_nobg")
+        # select_metric: auroc(推荐, 阈值无关) / f1_nobg / f1 / auprc
+        sel = cfg["TRAIN"].get("select_metric", "auroc")
         if sel == "auprc":
             sel_metric = macro_auprc(P, Y, class_names)
         elif sel == "f1":
             sel_metric = val_f1m
-        elif sel == "auroc":
-            sel_metric = val_auroc
-        else:  # f1_nobg (官方 DeepEthogram)
+        elif sel == "f1_nobg":
             sel_metric = val_f1m_nobg
+        else:  # auroc (默认, 阈值无关, 不会过拟合验证集)
+            sel_metric = val_auroc
         save_metrics(metrics_csv, epoch, class_names, per_class, val_f1m, grad_epoch,
                      tr_loss=tr_loss, val_loss=val_loss_dict.get("total", 0.0) if val_loss_dict else 0.0,
                      tr_loss_components=tr_loss_components,
@@ -776,12 +798,13 @@ def main():
         ld = build_loader(ds, cfg, split="val", batch_size=bs,
                           num_workers=nw, shuffle=False)
         ld._eval_tag = name
-        P, Y, loss_dict, tpc = evaluate(model, ld, cfg, device,
-                                        criterion=criterion, class_names=class_names)
+        # 测试集: 不传 thresholds 则 evaluate 内部自调 (仅作参考上限)
+        P, Y, loss_dict, tpc, test_thresholds = evaluate(model, ld, cfg, device,
+                                                         criterion=criterion, class_names=class_names)
         if cfg["POSTPROCESS"].get("temporal_smooth", False):
             P = smooth_probabilities(P, int(cfg["POSTPROCESS"].get("smooth_window", 3)))
-            thresholds, _ = evaluate_thresholds(Y, P, class_names, bg_idx=num_classes - 1)
-            pred = threshold_predict(P, thresholds, class_names)
+            # 时序平滑后用 evaluate 返回的同一阈值 (不在测试集重新自调)
+            pred = threshold_predict(P, test_thresholds, class_names)
             pred = compute_background(pred, bg_idx=num_classes - 1)
             eye = (Y[:, None] == np.arange(num_classes)).astype(int)
             tpc = binary_class_metrics(eye, pred, class_names)
