@@ -53,8 +53,14 @@ def apply_global_styling():
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
         html, body, [class*="css"] { font-family: 'Inter', Arial, sans-serif !important; }
         p, span, label, button, input, select, .stMetricValue, .stMetricLabel,
-        .stMarkdownContainer p, .stMarkdownContainer span { font-size: 14px !important; }
-        h2, h3, h4, [data-testid="stTabs"] button p { font-size: 20px !important; font-weight: 700 !important; }
+        .stMarkdownContainer p, .stMarkdownContainer span { font-size: 16px !important; }
+        h2, h3, h4, [data-testid="stTabs"] button p { font-size: 22px !important; font-weight: 700 !important; }
+        /* keep sidebar at comfortable size */
+        [data-testid="stSidebar"] p, [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] label, [data-testid="stSidebar"] button,
+        [data-testid="stSidebar"] input, [data-testid="stSidebar"] select,
+        [data-testid="stSidebar"] .stMarkdownContainer p,
+        [data-testid="stSidebar"] .stMarkdownContainer span { font-size: 14px !important; }
         #super-title-container { text-align: center !important; margin: 30px 0 !important; }
         #super-title { font-size: 52px !important; font-weight: 900 !important;
                        color: #1f77b4 !important; line-height: 1.0 !important; }
@@ -247,26 +253,27 @@ def main():
         st.session_state.yolo_path = DEFAULT_YOLO
 
     with st.sidebar:
-        st.markdown("## Model Configuration")
-        st.session_state.tadaconv_path = st.text_input("TAdaConv Weight Path",
+        st.markdown("## ⚙️ Model Configuration")
+        st.session_state.tadaconv_path = st.text_input("Action Recognition Model Path",
                                                        value=st.session_state.tadaconv_path, key="tadaconv_input")
-        st.session_state.yolo_path = st.text_input("YOLO Weight Path",
+        st.session_state.yolo_path = st.text_input("Mouse Detector (YOLO) Path",
                                                    value=st.session_state.yolo_path, key="yolo_input")
         st.markdown("---")
-        st.markdown("## Behavior Classes")
+        st.markdown("## 📊 Behavior Classes")
         for c in CLASS_NAMES:
-            st.caption("bullet " + c)
+            st.markdown("• " + c)
         st.markdown("---")
-        st.markdown("## System")
+        st.markdown("## 💻 System")
         st.caption("Device: %s" % ("GPU" if torch.cuda.is_available() else "CPU"))
         st.caption("PyTorch: " + torch.__version__)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        ["Video Upload", "Keypoint Detection", "Behavior Prediction", "Label Editor", "Export"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["📹 Video Upload", "🧬 Keypoint Detection", "🧬 MoSeq Detection",
+         "🧠 Behavior Prediction", "✏️ Label Editor", "💾 Export"])
 
     # ---------- Tab 1: Video Upload ----------
     with tab1:
-        st.markdown("### Upload Video")
+        st.markdown("### 📹 Upload Video")
         video_file = st.file_uploader("Select a video", type=["mp4", "avi", "mov"], key="video_upload")
         if video_file:
             temp_video_path = os.path.join(tempfile.gettempdir(), video_file.name)
@@ -293,37 +300,43 @@ def main():
                 st.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), caption="Frame %d" % preview_idx, width=400)
             vc.release()
 
-    # ---------- Tab 2: Keypoint Detection + MoSeq ----------
+    # ---------- Tab 2: Keypoint Detection ----------
     with tab2:
-        st.markdown("### Keypoint Detection (DeepLabCut SuperAnimal)")
+        st.markdown("### 🧬 Keypoint Detection (DeepLabCut SuperAnimal)")
         if st.session_state.temp_video_path is None:
             st.info("Upload a video first (tab 1).")
         else:
-            if st.button("Detect Keypoints", key="btn_kp"):
+            if st.button("🔍 Detect Keypoints", key="btn_kp"):
                 st.session_state.kp_csv = run_keypoint_detection(st.session_state.temp_video_path)
                 if st.session_state.kp_csv:
                     st.success("Keypoints saved: %s" % os.path.basename(st.session_state.kp_csv))
             if st.session_state.kp_csv:
                 st.markdown("#### Keypoint file")
                 st.code(st.session_state.kp_csv)
-                st.markdown("### Keypoint-MoSeq Syllables")
-                if st.button("Run Keypoint-MoSeq (syllables)", key="btn_moseq"):
-                    out_dir = os.path.join(tempfile.gettempdir(), "moseq_fit_out")
-                    st.session_state.syllable_path = run_moseq(
-                        st.session_state.temp_video_path, st.session_state.kp_csv, out_dir)
-                    if st.session_state.syllable_path:
-                        st.success("Syllables saved: %s" % os.path.basename(st.session_state.syllable_path))
-                if st.session_state.syllable_path:
-                    syl = np.load(st.session_state.syllable_path)
-                    st.info("Frames: %d, syllables: %d" % (len(syl), int(syl.max()) + 1))
 
-    # ---------- Tab 3: Behavior Prediction ----------
+    # ---------- Tab 3: MoSeq Detection ----------
     with tab3:
-        st.markdown("### Behavior Prediction")
+        st.markdown("### 🧬 MoSeq Syllable Detection (Keypoint-MoSeq)")
+        if st.session_state.kp_csv is None:
+            st.info("Detect keypoints first (tab 2).")
+        else:
+            if st.button("🧬 Run Keypoint-MoSeq (syllables)", key="btn_moseq"):
+                out_dir = os.path.join(tempfile.gettempdir(), "moseq_fit_out")
+                st.session_state.syllable_path = run_moseq(
+                    st.session_state.temp_video_path, st.session_state.kp_csv, out_dir)
+                if st.session_state.syllable_path:
+                    st.success("Syllables saved: %s" % os.path.basename(st.session_state.syllable_path))
+            if st.session_state.syllable_path:
+                syl = np.load(st.session_state.syllable_path)
+                st.info("Frames: %d, syllables: %d" % (len(syl), int(syl.max()) + 1))
+
+    # ---------- Tab 4: Behavior Prediction ----------
+    with tab4:
+        st.markdown("### 🧠 Behavior Prediction")
         if st.session_state.temp_video_path is None:
             st.info("Upload a video first (tab 1).")
         else:
-            if st.button("Run Prediction", key="predict_btn"):
+            if st.button("🚀 Run Prediction", key="predict_btn"):
                 with st.spinner("Loading models..."):
                     model, yolo = load_models(st.session_state.tadaconv_path, st.session_state.yolo_path)
                 if model is None or yolo is None:
@@ -340,14 +353,14 @@ def main():
                             pred = moseq_boundary_refine(pred, syllable_boundaries(syl))
                             st.success("MoSeq syllable-boundary smoothing applied.")
                         else:
-                            st.caption("No syllables found; skipped boundary smoothing. Run tab 2 first.")
+                            st.caption("No syllables found; skipped boundary smoothing. Run tab 3 first.")
                         pred_arg = P.argmax(axis=1)
                         n = P.shape[0]
+                        dist = pred.sum(axis=0)
                         st.markdown("#### Prediction Statistics")
                         c1, c2, c3 = st.columns(3)
                         c1.metric("Frames", n)
-                        c2.metric("Top-1 argmax accuracy vs self", "N/A")
-                        dist = pred.sum(axis=0)
+                        c2.metric("Behaviors detected", int((dist > 0).sum()))
                         c3.metric("Most frequent", CLASS_NAMES[int(np.argmax(dist))])
                         st.markdown("#### Behavior Distribution")
                         dist_df = pd.DataFrame({"behavior": CLASS_NAMES, "frames": dist})
@@ -359,11 +372,11 @@ def main():
                         st.error("Prediction failed: %s" % e)
                         logger.error("Prediction error: %s", e, exc_info=True)
 
-    # ---------- Tab 4: Label Editor ----------
-    with tab4:
-        st.markdown("### Frame Label Editor")
+    # ---------- Tab 5: Label Editor ----------
+    with tab5:
+        st.markdown("### ✏️ Frame Label Editor")
         if st.session_state.frame_results is None or len(st.session_state.frame_results) == 0:
-            st.info("Run prediction first (tab 3).")
+            st.info("Run prediction first (tab 4).")
         else:
             df = pd.DataFrame(st.session_state.frame_results)
             idx = st.number_input("Frame ID", 0, len(df) - 1, 0, key="edit_frame_num")
@@ -375,11 +388,11 @@ def main():
                 st.success("Frame %d updated: %s -> %s" % (idx, cur, new_label))
             st.dataframe(df, use_container_width=True, height=300)
 
-    # ---------- Tab 5: Export ----------
-    with tab5:
-        st.markdown("### Export Results")
+    # ---------- Tab 6: Export ----------
+    with tab6:
+        st.markdown("### 💾 Export Results")
         if st.session_state.frame_results is None or len(st.session_state.frame_results) == 0:
-            st.info("Run prediction first (tab 3).")
+            st.info("Run prediction first (tab 4).")
         else:
             export_df = pd.DataFrame(st.session_state.frame_results)
             st.download_button("Download CSV", export_df.to_csv(index=False), "behavior_predictions.csv", "text/csv")
