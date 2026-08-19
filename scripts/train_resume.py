@@ -306,14 +306,23 @@ def evaluate(model, loader, cfg, device, criterion=None, class_names=None, thres
     used_thresholds = thresholds
     epoch_metrics = None
     if class_names is not None:
-        # DeepEthogram 官方 evaluate_thresholds: 每类 argmax-F1 调阈值 + valid_bg(background=NOT others)
-        # 在给定数据上直接调优并报指标 (官方行为), 阈值随 split 独立。
-        epoch_metrics, per_class, used_thresholds = ethogram_metrics(P, Y, class_names, bg_idx=bg_idx)
+        if thresholds is not None:
+            # 外部固定阈值 (训练集调优的) -> 验证/测试集用此阈值, 不自调 (避免过拟合)
+            if isinstance(thresholds, dict):
+                thr_array = np.array([float(thresholds.get(c, 0.5)) for c in class_names])
+            else:
+                thr_array = np.asarray(thresholds, dtype=float).reshape(-1)
+            epoch_metrics, per_class, used_thresholds = ethogram_metrics(
+                P, Y, class_names, bg_idx=bg_idx, fixed_thresholds=thr_array)
+        else:
+            # 无外部阈值: DeepEthogram 官方在本数据集上逐类 argmax-F1 调优 + valid_bg
+            epoch_metrics, per_class, used_thresholds = ethogram_metrics(
+                P, Y, class_names, bg_idx=bg_idx)
         cnt = np.bincount(Y.astype(np.int64), minlength=len(class_names))
         thr_str = ", ".join(f"{c}={float(used_thresholds[i]):.3f}" for i, c in enumerate(class_names))
         cnt_str = ", ".join(f"{c}={int(cnt[i])}" for i, c in enumerate(class_names))
         print(f"  [{tag}] 每类样本数: {cnt_str}", flush=True)
-        print(f"  [{tag}] 每类官方阈值(argmax-F1+valid_bg): {thr_str}", flush=True)
+        print(f"  [{tag}] 每类阈值({'固定' if thresholds is not None else '调优'}): {thr_str}", flush=True)
     return P, Y, loss_dict, per_class, used_thresholds, epoch_metrics
 
 
@@ -494,8 +503,10 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
         # val 评估 (官方 evaluate_thresholds: 在 val 上逐类 argmax-F1 调阈值 + valid_bg)
         print(f"[{tag}] ep{epoch+1}/{epochs} 训练完成, 验证中... (val样本={len(va_ld.dataset)})", flush=True)
         va_ld._eval_tag = f"{tag}/val"
+        # 验证集用训练集调优的固定阈值, 不在验证集自调 (避免过拟合验证集)
         P, Y, val_loss_dict, per_class, val_thresholds, val_em = evaluate(
-            model, va_ld, cfg, device, criterion=criterion, class_names=class_names)
+            model, va_ld, cfg, device, criterion=criterion, class_names=class_names,
+            thresholds=train_thresholds)
         # DeepEthogram 官方上报指标 (eLife Evaluation 段):
         #   accuracy_overall=所有类混淆矩阵求和后的二元acc; f1_class_mean=全类(含bg) macro-F1;
         #   auroc_class_mean=逐类AUROC均值; mAP_class_mean=逐类mAP均值
@@ -539,14 +550,19 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
             print(f"[{tag}]       {c:<12}{pc['accuracy']:>6.1f}%{pc['f1']:>6.1f}%"
                   f"{pc['recall']:>7.1f}%{pc['precision']:>9.1f}%", flush=True)
 
+        epoch_pt = os.path.join(ckpt_dir, f"{tag}_epoch_{epoch:03d}.pt")
         torch.save({"epoch": epoch, "stage": tag, "model_state": model.state_dict()},
-                   os.path.join(ckpt_dir, f"{tag}_epoch_{epoch:03d}.pt"))
+                   epoch_pt)
+        print(f"[{tag}] ep{epoch+1}/{epochs} checkpoint saved: {os.path.basename(epoch_pt)}", flush=True)
         if sel_metric > best_f1:
             best_f1, best_epoch, bad = sel_metric, epoch, 0
+            best_pt = os.path.join(ckpt_dir, f"{tag}_best.pt")
             torch.save({"epoch": epoch, "stage": tag, "model_state": model.state_dict(),
                         "best_metric": best_f1, "val_f1m": val_f1m,
                         "val_f1m_nobg": val_f1m_nobg},
-                       os.path.join(ckpt_dir, f"{tag}_best.pt"))
+                       best_pt)
+            print(f"[{tag}] ep{epoch+1}/{epochs} best checkpoint saved: {os.path.basename(best_pt)} "
+                  f"({sel}={best_f1:.3f})", flush=True)
         else:
             bad += 1
             if bad >= patience:
