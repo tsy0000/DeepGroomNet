@@ -95,12 +95,16 @@ def register(model, use_cpam, use_stsa):
             _reg(model, f"{tag}(总)", tag, "STSA 空间移位注意力 (式11-15)")
             _reg(model, f"  {tag}.mlp1", f"{tag}.mlp1",
                  "[式11] MLP1: C->3C (Linear->GELU->Linear)")
+            _reg(model, f"  {tag}.sa(总)", f"{tag}.sa",
+                 "[图5a] SA: 输入=split后的3路χ1/χ2/χ3, softmax(K维)加权求和")
             _reg(model, f"  {tag}.sa.mlp", f"{tag}.sa.mlp",
-                 "[图5a] SA: MLP2(GELU(MLP1)), 沿C维")
+                 "[图5a] SA内部 MLP2(GELU(MLP1)), 沿C维")
+            _reg(model, f"  {tag}.ta(总)", f"{tag}.ta",
+                 "[图5b] TA: 输入=3路χ, Sum_K->帧差->sigmoid时间掩码")
             _reg(model, f"  {tag}.ta.conv", f"{tag}.ta.conv",
-                 "[图5b] TA: Conv3d(3,1,1) 生成 sigmoid 时间掩码")
+                 "[图5b] TA内部 Conv3d(3,1,1) 生成 sigmoid 时间掩码")
             _reg(model, f"  {tag}.mlp2", f"{tag}.mlp2",
-                 "[式15] MLP2: C->C 融合")
+                 "[式15] MLP2: C->C 融合 (残差图3)")
     if use_cpam:
         _reg(model, "CPAM(总)", "cpam", "辅助监督 (式2-7)")
         for i in range(4):
@@ -145,6 +149,31 @@ def main():
     print(">>=进入模块 in=输入形状 [原文: 式/图];  <<=离开模块 out=输出形状")
     print("=" * 88)
     register(model, bool(args.cpam), bool(args.stsa))
+
+    # ---- 打印"纯函数/张量操作"步骤 (不是 nn.Module, forward hook 抓不到) ----
+    # 1) STSA 空间移位 SS1/SS2 (式13/14) + split
+    import models.modules.stsa as _stsa
+    _orig_s1, _orig_s2 = _stsa.spatial_shift1, _stsa.spatial_shift2
+    def _wrapped_shift(orig, label, eq):
+        def w(x):
+            print(f"      [split] χ{label} = 3C第{label}段 C 通道: {tuple(x.shape)}  [式12]")
+            y = orig(x)
+            print(f"      [SS{label}] spatial_shift{label}(χ{label}): {tuple(x.shape)} -> {tuple(y.shape)}  {eq}")
+            return y
+        return w
+    _stsa.spatial_shift1 = _wrapped_shift(_orig_s1, 1, "[式13] SS1: 通道块沿 H/W 平移, 边界补0")
+    _stsa.spatial_shift2 = _wrapped_shift(_orig_s2, 2, "[式14] SS2: 反向组合移位")
+
+    # 2) CPAM 特征对齐 resize (式3): proj 输出 -> 插值到最深层 7x7
+    import torch.nn.functional as _F
+    _orig_interp = _F.interpolate
+    def _wrapped_interp(inp, size=None, scale_factor=None, mode=None, **kw):
+        o = _orig_interp(inp, size=size, scale_factor=scale_factor, mode=mode, **kw)
+        if isinstance(size, (tuple, list)) and tuple(inp.shape[2:]) != tuple(size):
+            print(f"      [式3] F.interpolate 对齐: {tuple(inp.shape)} -> {tuple(o.shape)}  (size={tuple(size)})")
+        return o
+    _F.interpolate = _wrapped_interp
+
     x = torch.randn(args.batch, 3, 32, 224, 224)
     with torch.no_grad():
         logits, aux = model(x)
