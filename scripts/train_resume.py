@@ -496,6 +496,15 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
         thr_str = ", ".join(f"{c}={train_thresholds.get(c, 0.5):.3f}" for c in class_names)
         print(f"[{tag}] ep{epoch+1}/{epochs} 训练集调优阈值: {thr_str}", flush=True)
 
+        # ---- 用同一调优阈值重算训练集指标 (与 val 同口径, 公平对比) ----
+        # 之前 tr_per_class 用的是 0.5 固定阈值, 与 val 的调优阈值不可比 (导致 train 明显偏低)。
+        # 现在 train/val 都用 train_thresholds 二值化。时序平滑仅对 val 生效 (训练样本是乱序 clip, 无法平滑)。
+        tr_pred_t = threshold_predict(tr_P, train_thresholds, class_names)
+        tr_pred_t = compute_background(tr_pred_t, bg_idx=bg_idx)
+        tr_eye = (tr_Y[:, None] == np.arange(num_classes)).astype(int)
+        tr_per_class = binary_class_metrics(tr_eye, tr_pred_t, class_names)
+        tr_f1m = f1_macro_from(tr_per_class, class_names)
+
         # val 评估 (用训练集阈值, 避免验证集自调过拟合)
         print(f"[{tag}] ep{epoch+1}/{epochs} 训练完成, 验证中... (val样本={len(va_ld.dataset)})", flush=True)
         va_ld._eval_tag = f"{tag}/val"
@@ -537,19 +546,19 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
                      tr_per_class=tr_per_class, tr_f1m=tr_f1m)
 
         # ---- 每 epoch 结束后: DeepEthogram 官方指标 (overall acc + 全类macro-F1 + macro-AUROC) ----
-        print(f"\n[{tag}] ep{epoch+1}/{epochs} | TRAIN loss={tr_loss:.3f} "
+        print(f"\n[{tag}] ep{epoch+1}/{epochs} | TRAIN loss={tr_loss:.3f} F1_macro(调优阈)={tr_f1m:.2f} "
               f"| VAL loss={(val_loss_dict.get('total',0.0) if val_loss_dict else 0.0):.3f} "
               f"overall_acc={val_overall_acc*100:.1f}% "
               f"F1_macro(全类)={val_f1m:.2f} AUROC(macro)={val_auroc:.3f} "
               f"[选择目标]={sel}={sel_metric:.3f} "
               f"| grad_L2={grad_epoch['grad_l2']:.1e} grad_max={grad_epoch['grad_max']:.1e} "
               f"grad_NaN={grad_epoch['grad_nan']}", flush=True)
-        print(f"[{tag}] TRAIN {'Class':<12}{'Acc':>7}{'F1':>7}{'Recall':>8}{'Precision':>10}", flush=True)
+        print(f"[{tag}] TRAIN (阈值=训练集调优) {'Class':<12}{'Acc':>7}{'F1':>7}{'Recall':>8}{'Precision':>10}", flush=True)
         for c in class_names:
             pc = tr_per_class[c]
             print(f"[{tag}]       {c:<12}{pc['accuracy']:>6.1f}%{pc['f1']:>6.1f}%"
                   f"{pc['recall']:>7.1f}%{pc['precision']:>9.1f}%", flush=True)
-        print(f"[{tag}] VAL   {'Class':<12}{'Acc':>7}{'F1':>7}{'Recall':>8}{'Precision':>10}", flush=True)
+        print(f"[{tag}] VAL   (阈值=训练集调优+平滑) {'Class':<12}{'Acc':>7}{'F1':>7}{'Recall':>8}{'Precision':>10}", flush=True)
         for c in class_names:
             pc = per_class[c]
             print(f"[{tag}]       {c:<12}{pc['accuracy']:>6.1f}%{pc['f1']:>6.1f}%"
