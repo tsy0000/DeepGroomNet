@@ -1,17 +1,17 @@
-"""DeepEthogram 官方指标算法忠实迁移 (deepethogram/metrics.py + postprocessing.remove_low_thresholds)。
+"""Multilabel classification metrics (threshold search + per-class report).
 
-源码: D:/deepethogram-master/deepethogram/metrics.py
-  核心: evaluate_thresholds / postprocess(valid_bg) / binary_confusion_matrix / compute_metrics_by_threshold
+Core:
+  - evaluate_thresholds: per-class argmax-F1 threshold search on a grid,
+    with remove_low_thresholds and valid-background handling.
+  - postprocess / binary_confusion_matrix / compute_metrics_by_threshold.
+  - epoch metrics: accuracy_overall (pooled binary acc), macro-F1 (all classes),
+    macro-AUROC, macro-mAP; background handled via an explicit bg_idx (supports
+    OFT where background=0 and openfield where background is the last class).
 
-适配点 (相对官方):
-  - 官方硬编码 background=索引0; 本项目 OFT background=0, openfield background=末类。
-    故所有 valid_bg / nobg 均以显式传入的 bg_idx 为准。
-  - 去掉 multiprocessing (单进程, 向量化足够快)。
-
-官方 epoch_metrics 口径 (eLife 论文 Evaluation 段):
-  - accuracy_overall: 所有类 2x2 混淆矩阵求和后的二元准确率 (tn+tp)/total
-  - f1_class_mean: 全类(含 background) 逐类二元 F1 均值
-  - f1_class_mean_nobg: 排除 background 的逐类 F1 均值 (论文 HPO/选模型目标)
+Reported metrics (eLife Evaluation convention):
+  - accuracy_overall: (tn+tp)/total over the summed per-class confusion matrices
+  - f1_class_mean: macro F1 over all classes (incl. background)
+  - f1_class_mean_nobg: macro F1 excluding background (HPO/selection target)
   - auroc_class_mean: 逐类 AUROC 均值 (阈值网格梯形积分)
   - mAP_class_mean: 逐类 mAP 均值
 """
@@ -226,14 +226,57 @@ def evaluate_thresholds(probabilities, labels, bg_idx, thresholds=None):
     return metrics_by_threshold, epoch_metrics
 
 
-def ethogram_metrics(P, Y, class_names, bg_idx, thresholds=None):
+def compute_metrics(P, Y, class_names, bg_idx, thresholds=None, fixed_thresholds=None):
     """便捷封装: 返回 (epoch_metrics, per_class_table, used_thresholds)。
 
     per_class_table: {class: {accuracy, precision, recall, f1, auroc}} (百分数 for acc/pre/rec/f1)。
-    thresholds 为 None 时在给定数据上按官方 argmax-F1 调优。
+    thresholds: 阈值搜索网格 (None=默认200点), 仅在 fixed_thresholds 为 None 时生效。
+    fixed_thresholds: 逐类固定阈值 (K,) numpy array。传入时跳过搜索, 直接用该阈值预测
+                      (用于验证/测试集, 避免在验证集自调阈值导致过拟合)。
     """
-    mt, em = evaluate_thresholds(P, Y, bg_idx=bg_idx, thresholds=thresholds)
+    P = np.asarray(P, dtype=np.float64)
     K = P.shape[1]
+    if fixed_thresholds is not None:
+        # ---- 固定阈值模式: 不搜索, 直接预测 ----
+        thr = np.asarray(fixed_thresholds, dtype=float).reshape(-1)
+        assert len(thr) == K, f"fixed_thresholds length {len(thr)} != {K} classes"
+        pred = postprocess(P, thr, bg_idx)
+        lab = index_to_onehot(Y, K) if np.asarray(Y).ndim == 1 else np.asarray(Y, dtype=float)
+        cm = binary_confusion_matrix(pred, lab)
+        m = compute_metrics_by_threshold(None, None, None, bg_idx, cm=cm)
+        overall_cm = cm.sum(axis=2)
+        om = compute_metrics_by_threshold(None, None, None, bg_idx, cm=overall_cm)
+        nobg = [i for i in range(K) if i != bg_idx]
+        # AUROC/mAP 仍用全网格计算 (阈值无关, 不受 fixed_thresholds 影响)
+        full_mt, _ = evaluate_thresholds(P, Y, bg_idx=bg_idx, thresholds=thresholds)
+        em = {
+            "accuracy_overall": om["accuracy"],
+            "accuracy_by_class": m["accuracy"],
+            "f1_overall": om["f1"],
+            "f1_class_mean": float(m["f1"].mean()),
+            "f1_class_mean_nobg": float(m["f1"][nobg].mean()) if nobg else float(m["f1"].mean()),
+            "f1_by_class": m["f1"],
+            "precision_by_class": m["precision"],
+            "recall_by_class": m["recall"],
+            "auroc_by_class": full_mt["auroc"],
+            "auroc_class_mean": float(np.nanmean(full_mt["auroc"])),
+            "mAP_by_class": full_mt["mAP"],
+            "mAP_class_mean": float(np.nanmean(full_mt["mAP"])),
+            "binary_confusion": cm.transpose(2, 0, 1),
+        }
+        per_class = {}
+        for i, c in enumerate(class_names):
+            per_class[c] = {
+                "accuracy": float(em["accuracy_by_class"][i]) * 100,
+                "precision": float(em["precision_by_class"][i]) * 100,
+                "recall": float(em["recall_by_class"][i]) * 100,
+                "f1": float(em["f1_by_class"][i]) * 100,
+                "auroc": float(em["auroc_by_class"][i]) if np.isfinite(em["auroc_by_class"][i]) else 0.0,
+            }
+        return em, per_class, thr
+
+    # ---- 默认: 在给定数据上按官方 argmax-F1 调优 ----
+    mt, em = evaluate_thresholds(P, Y, bg_idx=bg_idx, thresholds=thresholds)
     per_class = {}
     for i, c in enumerate(class_names):
         per_class[c] = {

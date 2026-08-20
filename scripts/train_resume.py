@@ -33,7 +33,7 @@ from postprocess.thresholds import (evaluate_thresholds, threshold_predict,
                                     compute_background, min_bout_per_behavior,
                                     binary_metrics, smooth_probabilities,
                                     hmm_smooth, bout_stats)
-from postprocess.ethogram_metrics import ethogram_metrics  # DeepEthogram 官方指标迁移
+from postprocess.metrics import compute_metrics
 from torch.utils.data import DataLoader  # noqa: F401
 
 
@@ -312,11 +312,11 @@ def evaluate(model, loader, cfg, device, criterion=None, class_names=None, thres
                 thr_array = np.array([float(thresholds.get(c, 0.5)) for c in class_names])
             else:
                 thr_array = np.asarray(thresholds, dtype=float).reshape(-1)
-            epoch_metrics, per_class, used_thresholds = ethogram_metrics(
+            epoch_metrics, per_class, used_thresholds = compute_metrics(
                 P, Y, class_names, bg_idx=bg_idx, fixed_thresholds=thr_array)
         else:
             # 无外部阈值: DeepEthogram 官方在本数据集上逐类 argmax-F1 调优 + valid_bg
-            epoch_metrics, per_class, used_thresholds = ethogram_metrics(
+            epoch_metrics, per_class, used_thresholds = compute_metrics(
                 P, Y, class_names, bg_idx=bg_idx)
         cnt = np.bincount(Y.astype(np.int64), minlength=len(class_names))
         thr_str = ", ".join(f"{c}={float(used_thresholds[i]):.3f}" for i, c in enumerate(class_names))
@@ -495,7 +495,7 @@ def train_stage(model, tr_ld, va_ld, cfg, criterion, class_names, device,
         # ---- 官方 DeepEthogram: 训练集上逐类 argmax-F1 调阈值 + valid_bg, 报训练集指标 ----
         tr_P = np.concatenate(tr_all_probs)
         tr_Y = np.concatenate(tr_all_labels)
-        tr_em, tr_per_class, train_thresholds = ethogram_metrics(tr_P, tr_Y, class_names, bg_idx=bg_idx)
+        tr_em, tr_per_class, train_thresholds = compute_metrics(tr_P, tr_Y, class_names, bg_idx=bg_idx)
         thr_str = ", ".join(f"{c}={float(train_thresholds[i]):.3f}" for i, c in enumerate(class_names))
         print(f"[{tag}] ep{epoch+1}/{epochs} 训练集官方阈值(argmax-F1+valid_bg): {thr_str}", flush=True)
         tr_f1m = tr_em["f1_class_mean"]
