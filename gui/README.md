@@ -11,7 +11,7 @@ environments. Configure with environment variables:
 | `DLC_ENV_PY` | interpreter of the DeepLabCut environment |
 | `KPMS_ENV_PY` | interpreter of the Keypoint-MoSeq environment |
 | `YOLO_WEIGHTS` | path to the YOLO detector checkpoint |
-| `DEEPGRROOMNET_CKPT` | default video-model checkpoint |
+| `DEEPGROOMNET_CKPT` | default video-model checkpoint |
 
 Missing pieces, stated explicitly: the GUI does not bundle weights, does not
 ship a trained threshold file, and cannot run without the two optional

@@ -1,4 +1,3 @@
-# web_app.py - DeepGroomNet Mouse Behavior Prediction System
 # Pipeline: upload video -> detect keypoints (DLC SuperAnimal) -> Keypoint-MoSeq
 # syllables -> TAdaConv model behavior prediction with natural-boundary smoothing.
 # Run:  streamlit run web_app.py
@@ -248,7 +247,7 @@ def main():
     if 'frame_results' not in st.session_state:
         st.session_state.frame_results = None
     if 'tadaconv_path' not in st.session_state:
-        st.session_state.tadaconv_path = os.path.join(PROJECT_ROOT, "outputs", "checkpoints", "lpft_best.pt")
+        st.session_state.tadaconv_path = os.environ.get("DEEPGROOMNET_CKPT", "")
     if 'yolo_path' not in st.session_state:
         st.session_state.yolo_path = DEFAULT_YOLO
 
