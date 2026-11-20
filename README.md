@@ -23,7 +23,7 @@ bout definitions in the evaluation layer.
 run length, `c` the mean top-class probability inside the run. No new parameters.
 
 **Why STSA and CPAM.** STSA inserts spatial-shift attention after stage 3 and 4
-to sharpen small, fast局部 movements (paws, mouth) without changing the backbone
+to sharpen small, fast local movements (paws, mouth) without changing the backbone
 width. CPAM provides an auxiliary multi-stage supervision signal that stabilises
 training on small cohorts. Both are optional and ablated in the paper.
 
