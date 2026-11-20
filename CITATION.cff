@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+title: DeepGroomNet
+message: If you use this software, please cite the article and this repository.
+type: software
+authors:
+  - family-names: Tong
+    given-names: Siyi
+  - family-names: Yang
+    given-names: He
+  - family-names: Guo
+    given-names: Huaiqin
+  - family-names: Zhu
+    given-names: Yuzhi
+  - family-names: Tang
+    given-names: Qingyi
+  - family-names: Wang
+    given-names: Shaoli
+  - family-names: Lu
+    given-names: Wei
+license: MIT
+repository-code: https://github.com/tsy0000/DeepGroomNet
+version: 1.0.0
+date-released: 2026-11-20

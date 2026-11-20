@@ -1,0 +1,488 @@
+{
+  "protocol": "animal-level 5-fold CV",
+  "seed": 42,
+  "n_mice": 20,
+  "n_folds": 5,
+  "mice": [
+    "mouse00",
+    "mouse01",
+    "mouse02",
+    "mouse03",
+    "mouse04",
+    "mouse05",
+    "mouse06",
+    "mouse07",
+    "mouse08",
+    "mouse09",
+    "mouse10",
+    "mouse11",
+    "mouse12",
+    "mouse13",
+    "mouse14",
+    "mouse15",
+    "mouse16",
+    "mouse17",
+    "mouse18",
+    "mouse19"
+  ],
+  "videos_source": "downloaddatasets",
+  "checks": {
+    "each_fold_sizes_12_4_4": true,
+    "within_fold_split_disjoint": true,
+    "each_mouse_tested_exactly_once": true,
+    "no_window_crosses_videos": true
+  },
+  "informational": {
+    "val_appearances_per_mouse": {
+      "mouse00": 0,
+      "mouse01": 2,
+      "mouse02": 0,
+      "mouse03": 2,
+      "mouse04": 0,
+      "mouse05": 3,
+      "mouse06": 2,
+      "mouse07": 0,
+      "mouse08": 0,
+      "mouse09": 2,
+      "mouse10": 1,
+      "mouse11": 1,
+      "mouse12": 1,
+      "mouse13": 1,
+      "mouse14": 2,
+      "mouse15": 0,
+      "mouse16": 0,
+      "mouse17": 2,
+      "mouse18": 1,
+      "mouse19": 0
+    },
+    "train_appearances_per_mouse": {
+      "mouse00": 4,
+      "mouse01": 2,
+      "mouse02": 4,
+      "mouse03": 2,
+      "mouse04": 4,
+      "mouse05": 1,
+      "mouse06": 2,
+      "mouse07": 4,
+      "mouse08": 4,
+      "mouse09": 2,
+      "mouse10": 3,
+      "mouse11": 3,
+      "mouse12": 3,
+      "mouse13": 3,
+      "mouse14": 2,
+      "mouse15": 4,
+      "mouse16": 4,
+      "mouse17": 2,
+      "mouse18": 3,
+      "mouse19": 4
+    }
+  },
+  "per_mouse_roles": {
+    "mouse00": {
+      "test_fold": 3,
+      "val_folds": [],
+      "train_folds": [
+        0,
+        1,
+        2,
+        4
+      ],
+      "n_frames": 36578
+    },
+    "mouse01": {
+      "test_fold": 1,
+      "val_folds": [
+        2,
+        4
+      ],
+      "train_folds": [
+        0,
+        3
+      ],
+      "n_frames": 36578
+    },
+    "mouse02": {
+      "test_fold": 4,
+      "val_folds": [],
+      "train_folds": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "n_frames": 36578
+    },
+    "mouse03": {
+      "test_fold": 1,
+      "val_folds": [
+        2,
+        4
+      ],
+      "train_folds": [
+        0,
+        3
+      ],
+      "n_frames": 36573
+    },
+    "mouse04": {
+      "test_fold": 4,
+      "val_folds": [],
+      "train_folds": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "n_frames": 36573
+    },
+    "mouse05": {
+      "test_fold": 2,
+      "val_folds": [
+        0,
+        1,
+        3
+      ],
+      "train_folds": [
+        4
+      ],
+      "n_frames": 36577
+    },
+    "mouse06": {
+      "test_fold": 0,
+      "val_folds": [
+        2,
+        4
+      ],
+      "train_folds": [
+        1,
+        3
+      ],
+      "n_frames": 18258
+    },
+    "mouse07": {
+      "test_fold": 3,
+      "val_folds": [],
+      "train_folds": [
+        0,
+        1,
+        2,
+        4
+      ],
+      "n_frames": 18258
+    },
+    "mouse08": {
+      "test_fold": 3,
+      "val_folds": [],
+      "train_folds": [
+        0,
+        1,
+        2,
+        4
+      ],
+      "n_frames": 18278
+    },
+    "mouse09": {
+      "test_fold": 2,
+      "val_folds": [
+        0,
+        3
+      ],
+      "train_folds": [
+        1,
+        4
+      ],
+      "n_frames": 18278
+    },
+    "mouse10": {
+      "test_fold": 1,
+      "val_folds": [
+        3
+      ],
+      "train_folds": [
+        0,
+        2,
+        4
+      ],
+      "n_frames": 18278
+    },
+    "mouse11": {
+      "test_fold": 0,
+      "val_folds": [
+        1
+      ],
+      "train_folds": [
+        2,
+        3,
+        4
+      ],
+      "n_frames": 36577
+    },
+    "mouse12": {
+      "test_fold": 3,
+      "val_folds": [
+        1
+      ],
+      "train_folds": [
+        0,
+        2,
+        4
+      ],
+      "n_frames": 36577
+    },
+    "mouse13": {
+      "test_fold": 0,
+      "val_folds": [
+        3
+      ],
+      "train_folds": [
+        1,
+        2,
+        4
+      ],
+      "n_frames": 15866
+    },
+    "mouse14": {
+      "test_fold": 1,
+      "val_folds": [
+        2,
+        4
+      ],
+      "train_folds": [
+        0,
+        3
+      ],
+      "n_frames": 15866
+    },
+    "mouse15": {
+      "test_fold": 4,
+      "val_folds": [],
+      "train_folds": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "n_frames": 16228
+    },
+    "mouse16": {
+      "test_fold": 4,
+      "val_folds": [],
+      "train_folds": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "n_frames": 16228
+    },
+    "mouse17": {
+      "test_fold": 2,
+      "val_folds": [
+        0,
+        1
+      ],
+      "train_folds": [
+        3,
+        4
+      ],
+      "n_frames": 16230
+    },
+    "mouse18": {
+      "test_fold": 2,
+      "val_folds": [
+        0
+      ],
+      "train_folds": [
+        1,
+        3,
+        4
+      ],
+      "n_frames": 36578
+    },
+    "mouse19": {
+      "test_fold": 0,
+      "val_folds": [],
+      "train_folds": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "n_frames": 36577
+    }
+  },
+  "per_fold": [
+    {
+      "fold": 0,
+      "train": [
+        "mouse00",
+        "mouse01",
+        "mouse02",
+        "mouse03",
+        "mouse04",
+        "mouse07",
+        "mouse08",
+        "mouse10",
+        "mouse12",
+        "mouse14",
+        "mouse15",
+        "mouse16"
+      ],
+      "val": [
+        "mouse05",
+        "mouse09",
+        "mouse17",
+        "mouse18"
+      ],
+      "test": [
+        "mouse06",
+        "mouse11",
+        "mouse13",
+        "mouse19"
+      ],
+      "test_frames": 107278,
+      "val_frames": 107663,
+      "train_frames": 322593,
+      "partition_cost": 6.48224638002025e-05,
+      "val_cost": 0.008772265896737876
+    },
+    {
+      "fold": 1,
+      "train": [
+        "mouse00",
+        "mouse02",
+        "mouse04",
+        "mouse06",
+        "mouse07",
+        "mouse08",
+        "mouse09",
+        "mouse13",
+        "mouse15",
+        "mouse16",
+        "mouse18",
+        "mouse19"
+      ],
+      "val": [
+        "mouse05",
+        "mouse11",
+        "mouse12",
+        "mouse17"
+      ],
+      "test": [
+        "mouse01",
+        "mouse03",
+        "mouse10",
+        "mouse14"
+      ],
+      "test_frames": 107295,
+      "val_frames": 125961,
+      "train_frames": 304278,
+      "partition_cost": 6.48224638002025e-05,
+      "val_cost": 0.009064052051964732
+    },
+    {
+      "fold": 2,
+      "train": [
+        "mouse00",
+        "mouse02",
+        "mouse04",
+        "mouse07",
+        "mouse08",
+        "mouse10",
+        "mouse11",
+        "mouse12",
+        "mouse13",
+        "mouse15",
+        "mouse16",
+        "mouse19"
+      ],
+      "val": [
+        "mouse01",
+        "mouse03",
+        "mouse06",
+        "mouse14"
+      ],
+      "test": [
+        "mouse05",
+        "mouse09",
+        "mouse17",
+        "mouse18"
+      ],
+      "test_frames": 107663,
+      "val_frames": 107275,
+      "train_frames": 322596,
+      "partition_cost": 6.48224638002025e-05,
+      "val_cost": 0.00678917338086968
+    },
+    {
+      "fold": 3,
+      "train": [
+        "mouse01",
+        "mouse02",
+        "mouse03",
+        "mouse04",
+        "mouse06",
+        "mouse11",
+        "mouse14",
+        "mouse15",
+        "mouse16",
+        "mouse17",
+        "mouse18",
+        "mouse19"
+      ],
+      "val": [
+        "mouse05",
+        "mouse09",
+        "mouse10",
+        "mouse13"
+      ],
+      "test": [
+        "mouse00",
+        "mouse07",
+        "mouse08",
+        "mouse12"
+      ],
+      "test_frames": 109691,
+      "val_frames": 88999,
+      "train_frames": 338844,
+      "partition_cost": 6.48224638002025e-05,
+      "val_cost": 0.008478522289939325
+    },
+    {
+      "fold": 4,
+      "train": [
+        "mouse00",
+        "mouse05",
+        "mouse07",
+        "mouse08",
+        "mouse09",
+        "mouse10",
+        "mouse11",
+        "mouse12",
+        "mouse13",
+        "mouse17",
+        "mouse18",
+        "mouse19"
+      ],
+      "val": [
+        "mouse01",
+        "mouse03",
+        "mouse06",
+        "mouse14"
+      ],
+      "test": [
+        "mouse02",
+        "mouse04",
+        "mouse15",
+        "mouse16"
+      ],
+      "test_frames": 105607,
+      "val_frames": 107275,
+      "train_frames": 324652,
+      "partition_cost": 6.48224638002025e-05,
+      "val_cost": 0.007417577703706181
+    }
+  ],
+  "status": "PASS"
+}

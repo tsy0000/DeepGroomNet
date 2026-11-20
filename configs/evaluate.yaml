@@ -1,0 +1,12 @@
+CLASSES:
+  names: [Locomote, Rear, FaceGroom, BodyGroom, background]
+  background_index: 4
+EVALUATION:
+  fps: 30
+  bout_merge_gap_s: 6.0
+  bout_min_s: 0.0
+  switch_gap_s: 6.0
+STATS:
+  n_bootstrap: 4000
+  alpha: 0.05
+  correction: bh

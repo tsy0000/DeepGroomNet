@@ -1,0 +1,29 @@
+CLASSES:
+  names: [Locomote, Rear, FaceGroom, BodyGroom, background]
+  background_index: 4
+CLIP:
+  num_input_frames: 32
+  target_size: 224
+  norm_mean: 0.45
+  norm_std: 0.225
+MODEL:
+  cpam: true
+  stsa: true
+  checkpoint: null
+INFERENCE:
+  stride: 8
+  batch_size: 8
+  device: cuda
+SGATF:
+  alpha_max: 1.0
+  max_run: 12
+  consensus_floor: 0.35
+  consensus_span: 0.50
+POSTPROCESS:
+  smooth_window: 0
+  thresholds: [0.44729, 0.55281, 0.79399, 0.75379, 0.63320]
+PREPROCESS:
+  yolo_weights: null
+  yolo_stride: 30
+  yolo_margin: 0.2
+  yolo_conf: 0.3

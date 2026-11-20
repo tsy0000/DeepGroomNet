@@ -1,0 +1,540 @@
+{
+  "mode": "5fold",
+  "seed": 42,
+  "n_videos": 20,
+  "fold_sizes": {
+    "train": 12,
+    "val": 4,
+    "test": 4
+  },
+  "each_video_tested_once": true,
+  "folds": [
+    {
+      "fold": 0,
+      "seed": 42,
+      "labeler": "Jin",
+      "classes": [
+        "background",
+        "Supported",
+        "Unsupported",
+        "Grooming"
+      ],
+      "train": [
+        "E:/tsy/downloaddatasets2\\OFT_11.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_15.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_16.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_24.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_38.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_39.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_43.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_44.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_49.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_51.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_52.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_54.mp4"
+      ],
+      "val": [
+        "E:/tsy/downloaddatasets2\\OFT_5.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_12.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_6.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_50.mp4"
+      ],
+      "test": [
+        "E:/tsy/downloaddatasets2\\OFT_14.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_58.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_23.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_41.mp4"
+      ],
+      "partition_cost": 1.2660382326520007e-05,
+      "val_cost": 0.003003987081960157
+    },
+    {
+      "fold": 1,
+      "seed": 42,
+      "labeler": "Jin",
+      "classes": [
+        "background",
+        "Supported",
+        "Unsupported",
+        "Grooming"
+      ],
+      "train": [
+        "E:/tsy/downloaddatasets2\\OFT_12.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_14.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_15.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_16.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_23.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_24.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_38.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_43.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_49.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_51.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_58.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_6.mp4"
+      ],
+      "val": [
+        "E:/tsy/downloaddatasets2\\OFT_11.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_41.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_39.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_5.mp4"
+      ],
+      "test": [
+        "E:/tsy/downloaddatasets2\\OFT_50.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_44.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_54.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_52.mp4"
+      ],
+      "partition_cost": 1.2660382326520007e-05,
+      "val_cost": 0.0058522923111161695
+    },
+    {
+      "fold": 2,
+      "seed": 42,
+      "labeler": "Jin",
+      "classes": [
+        "background",
+        "Supported",
+        "Unsupported",
+        "Grooming"
+      ],
+      "train": [
+        "E:/tsy/downloaddatasets2\\OFT_14.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_15.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_16.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_23.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_38.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_41.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_44.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_49.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_51.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_52.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_54.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_58.mp4"
+      ],
+      "val": [
+        "E:/tsy/downloaddatasets2\\OFT_12.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_6.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_50.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_5.mp4"
+      ],
+      "test": [
+        "E:/tsy/downloaddatasets2\\OFT_11.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_39.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_24.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_43.mp4"
+      ],
+      "partition_cost": 1.2660382326520007e-05,
+      "val_cost": 0.004558453655888455
+    },
+    {
+      "fold": 3,
+      "seed": 42,
+      "labeler": "Jin",
+      "classes": [
+        "background",
+        "Supported",
+        "Unsupported",
+        "Grooming"
+      ],
+      "train": [
+        "E:/tsy/downloaddatasets2\\OFT_23.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_24.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_38.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_39.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_41.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_43.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_44.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_49.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_50.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_54.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_58.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_6.mp4"
+      ],
+      "val": [
+        "E:/tsy/downloaddatasets2\\OFT_14.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_11.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_52.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_51.mp4"
+      ],
+      "test": [
+        "E:/tsy/downloaddatasets2\\OFT_15.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_5.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_12.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_16.mp4"
+      ],
+      "partition_cost": 1.2660382326520007e-05,
+      "val_cost": 0.002247503077567152
+    },
+    {
+      "fold": 4,
+      "seed": 42,
+      "labeler": "Jin",
+      "classes": [
+        "background",
+        "Supported",
+        "Unsupported",
+        "Grooming"
+      ],
+      "train": [
+        "E:/tsy/downloaddatasets2\\OFT_11.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_12.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_14.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_15.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_16.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_23.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_24.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_39.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_41.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_43.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_5.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_58.mp4"
+      ],
+      "val": [
+        "E:/tsy/downloaddatasets2\\OFT_54.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_44.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_50.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_52.mp4"
+      ],
+      "test": [
+        "E:/tsy/downloaddatasets2\\OFT_51.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_49.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_6.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_38.mp4"
+      ],
+      "partition_cost": 1.2660382326520007e-05,
+      "val_cost": 0.003233297315530091
+    }
+  ],
+  "audits": [
+    {
+      "name": "fold0",
+      "splits": {
+        "train": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_11.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_15.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_16.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_24.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_38.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_39.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_43.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_44.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_49.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_51.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_52.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_54.mp4"
+          ],
+          "n_videos": 12,
+          "n_frames": 182774,
+          "pct": {
+            "background": 71.03,
+            "Supported": 16.6,
+            "Unsupported": 9.99,
+            "Grooming": 2.38
+          }
+        },
+        "val": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_5.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_12.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_6.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_50.mp4"
+          ],
+          "n_videos": 4,
+          "n_frames": 60931,
+          "pct": {
+            "background": 71.19,
+            "Supported": 16.56,
+            "Unsupported": 9.95,
+            "Grooming": 2.3
+          }
+        },
+        "test": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_14.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_58.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_23.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_41.mp4"
+          ],
+          "n_videos": 4,
+          "n_frames": 60929,
+          "pct": {
+            "background": 71.42,
+            "Supported": 16.58,
+            "Unsupported": 9.5,
+            "Grooming": 2.49
+          }
+        }
+      },
+      "checks": {
+        "disjoint": true,
+        "nonempty": true
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "fold1",
+      "splits": {
+        "train": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_12.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_14.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_15.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_16.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_23.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_24.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_38.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_43.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_49.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_51.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_58.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_6.mp4"
+          ],
+          "n_videos": 12,
+          "n_frames": 182755,
+          "pct": {
+            "background": 71.07,
+            "Supported": 16.58,
+            "Unsupported": 9.95,
+            "Grooming": 2.39
+          }
+        },
+        "val": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_11.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_41.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_39.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_5.mp4"
+          ],
+          "n_videos": 4,
+          "n_frames": 60960,
+          "pct": {
+            "background": 71.29,
+            "Supported": 16.57,
+            "Unsupported": 9.63,
+            "Grooming": 2.51
+          }
+        },
+        "test": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_50.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_44.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_54.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_52.mp4"
+          ],
+          "n_videos": 4,
+          "n_frames": 60919,
+          "pct": {
+            "background": 71.19,
+            "Supported": 16.62,
+            "Unsupported": 9.93,
+            "Grooming": 2.26
+          }
+        }
+      },
+      "checks": {
+        "disjoint": true,
+        "nonempty": true
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "fold2",
+      "splits": {
+        "train": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_14.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_15.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_16.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_23.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_38.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_41.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_44.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_49.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_51.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_52.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_54.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_58.mp4"
+          ],
+          "n_videos": 12,
+          "n_frames": 182772,
+          "pct": {
+            "background": 71.15,
+            "Supported": 16.54,
+            "Unsupported": 9.86,
+            "Grooming": 2.46
+          }
+        },
+        "val": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_12.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_6.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_50.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_5.mp4"
+          ],
+          "n_videos": 4,
+          "n_frames": 60931,
+          "pct": {
+            "background": 71.19,
+            "Supported": 16.56,
+            "Unsupported": 9.95,
+            "Grooming": 2.3
+          }
+        },
+        "test": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_11.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_39.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_24.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_43.mp4"
+          ],
+          "n_videos": 4,
+          "n_frames": 60931,
+          "pct": {
+            "background": 71.07,
+            "Supported": 16.76,
+            "Unsupported": 9.9,
+            "Grooming": 2.27
+          }
+        }
+      },
+      "checks": {
+        "disjoint": true,
+        "nonempty": true
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "fold3",
+      "splits": {
+        "train": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_23.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_24.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_38.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_39.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_41.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_43.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_44.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_49.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_50.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_54.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_58.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_6.mp4"
+          ],
+          "n_videos": 12,
+          "n_frames": 182765,
+          "pct": {
+            "background": 71.23,
+            "Supported": 16.57,
+            "Unsupported": 9.8,
+            "Grooming": 2.39
+          }
+        },
+        "val": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_14.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_11.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_52.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_51.mp4"
+          ],
+          "n_videos": 4,
+          "n_frames": 60929,
+          "pct": {
+            "background": 71.11,
+            "Supported": 16.67,
+            "Unsupported": 9.79,
+            "Grooming": 2.43
+          }
+        },
+        "test": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_15.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_5.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_12.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_16.mp4"
+          ],
+          "n_videos": 4,
+          "n_frames": 60940,
+          "pct": {
+            "background": 70.89,
+            "Supported": 16.55,
+            "Unsupported": 10.21,
+            "Grooming": 2.34
+          }
+        }
+      },
+      "checks": {
+        "disjoint": true,
+        "nonempty": true
+      },
+      "status": "PASS"
+    },
+    {
+      "name": "fold4",
+      "splits": {
+        "train": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_11.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_12.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_14.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_15.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_16.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_23.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_24.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_39.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_41.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_43.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_5.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_58.mp4"
+          ],
+          "n_videos": 12,
+          "n_frames": 182800,
+          "pct": {
+            "background": 71.13,
+            "Supported": 16.63,
+            "Unsupported": 9.87,
+            "Grooming": 2.37
+          }
+        },
+        "val": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_54.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_44.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_50.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_52.mp4"
+          ],
+          "n_videos": 4,
+          "n_frames": 60919,
+          "pct": {
+            "background": 71.19,
+            "Supported": 16.62,
+            "Unsupported": 9.93,
+            "Grooming": 2.26
+          }
+        },
+        "test": {
+          "videos": [
+            "E:/tsy/downloaddatasets2\\OFT_51.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_49.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_6.mp4",
+            "E:/tsy/downloaddatasets2\\OFT_38.mp4"
+          ],
+          "n_videos": 4,
+          "n_frames": 60915,
+          "pct": {
+            "background": 71.13,
+            "Supported": 16.42,
+            "Unsupported": 9.86,
+            "Grooming": 2.58
+          }
+        }
+      },
+      "checks": {
+        "disjoint": true,
+        "nonempty": true
+      },
+      "status": "PASS"
+    }
+  ]
+}

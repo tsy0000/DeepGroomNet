@@ -1,0 +1,277 @@
+{
+  "meta": {
+    "protocol": "animal-level 5-fold",
+    "seed": 42,
+    "n_mice": 20,
+    "classes": [
+      "Locomote",
+      "Rear",
+      "FaceGroom",
+      "BodyGroom",
+      "background"
+    ],
+    "source": "downloaddatasets",
+    "video_counts": {
+      "train": 12,
+      "val": 4,
+      "test": 4
+    }
+  },
+  "folds": [
+    {
+      "fold": 0,
+      "train": [
+        "mouse00",
+        "mouse01",
+        "mouse02",
+        "mouse03",
+        "mouse04",
+        "mouse07",
+        "mouse08",
+        "mouse10",
+        "mouse12",
+        "mouse14",
+        "mouse15",
+        "mouse16"
+      ],
+      "val": [
+        "mouse05",
+        "mouse09",
+        "mouse17",
+        "mouse18"
+      ],
+      "test": [
+        "mouse06",
+        "mouse11",
+        "mouse13",
+        "mouse19"
+      ],
+      "test_frames": 107278,
+      "val_frames": 107663,
+      "train_frames": 322593,
+      "partition_cost": 6.48224638002025e-05,
+      "val_cost": 0.008772265896737876
+    },
+    {
+      "fold": 1,
+      "train": [
+        "mouse00",
+        "mouse02",
+        "mouse04",
+        "mouse06",
+        "mouse07",
+        "mouse08",
+        "mouse09",
+        "mouse13",
+        "mouse15",
+        "mouse16",
+        "mouse18",
+        "mouse19"
+      ],
+      "val": [
+        "mouse05",
+        "mouse11",
+        "mouse12",
+        "mouse17"
+      ],
+      "test": [
+        "mouse01",
+        "mouse03",
+        "mouse10",
+        "mouse14"
+      ],
+      "test_frames": 107295,
+      "val_frames": 125961,
+      "train_frames": 304278,
+      "partition_cost": 6.48224638002025e-05,
+      "val_cost": 0.009064052051964732
+    },
+    {
+      "fold": 2,
+      "train": [
+        "mouse00",
+        "mouse02",
+        "mouse04",
+        "mouse07",
+        "mouse08",
+        "mouse10",
+        "mouse11",
+        "mouse12",
+        "mouse13",
+        "mouse15",
+        "mouse16",
+        "mouse19"
+      ],
+      "val": [
+        "mouse01",
+        "mouse03",
+        "mouse06",
+        "mouse14"
+      ],
+      "test": [
+        "mouse05",
+        "mouse09",
+        "mouse17",
+        "mouse18"
+      ],
+      "test_frames": 107663,
+      "val_frames": 107275,
+      "train_frames": 322596,
+      "partition_cost": 6.48224638002025e-05,
+      "val_cost": 0.00678917338086968
+    },
+    {
+      "fold": 3,
+      "train": [
+        "mouse01",
+        "mouse02",
+        "mouse03",
+        "mouse04",
+        "mouse06",
+        "mouse11",
+        "mouse14",
+        "mouse15",
+        "mouse16",
+        "mouse17",
+        "mouse18",
+        "mouse19"
+      ],
+      "val": [
+        "mouse05",
+        "mouse09",
+        "mouse10",
+        "mouse13"
+      ],
+      "test": [
+        "mouse00",
+        "mouse07",
+        "mouse08",
+        "mouse12"
+      ],
+      "test_frames": 109691,
+      "val_frames": 88999,
+      "train_frames": 338844,
+      "partition_cost": 6.48224638002025e-05,
+      "val_cost": 0.008478522289939325
+    },
+    {
+      "fold": 4,
+      "train": [
+        "mouse00",
+        "mouse05",
+        "mouse07",
+        "mouse08",
+        "mouse09",
+        "mouse10",
+        "mouse11",
+        "mouse12",
+        "mouse13",
+        "mouse17",
+        "mouse18",
+        "mouse19"
+      ],
+      "val": [
+        "mouse01",
+        "mouse03",
+        "mouse06",
+        "mouse14"
+      ],
+      "test": [
+        "mouse02",
+        "mouse04",
+        "mouse15",
+        "mouse16"
+      ],
+      "test_frames": 105607,
+      "val_frames": 107275,
+      "train_frames": 324652,
+      "partition_cost": 6.48224638002025e-05,
+      "val_cost": 0.007417577703706181
+    }
+  ],
+  "old_split": {
+    "train": [
+      "mouse00",
+      "mouse01",
+      "mouse02",
+      "mouse03",
+      "mouse06",
+      "mouse07",
+      "mouse08",
+      "mouse10",
+      "mouse11",
+      "mouse12",
+      "mouse15",
+      "mouse16",
+      "mouse17",
+      "mouse18"
+    ],
+    "val": [
+      "mouse04",
+      "mouse05",
+      "mouse14",
+      "mouse19"
+    ],
+    "test": [
+      "mouse09",
+      "mouse13"
+    ],
+    "ratios": "0.7/0.2/0.1",
+    "seed": 42
+  },
+  "comparison": {
+    "old": {
+      "train": [
+        "mouse00",
+        "mouse01",
+        "mouse02",
+        "mouse03",
+        "mouse06",
+        "mouse07",
+        "mouse08",
+        "mouse10",
+        "mouse11",
+        "mouse12",
+        "mouse15",
+        "mouse16",
+        "mouse17",
+        "mouse18"
+      ],
+      "val": [
+        "mouse04",
+        "mouse05",
+        "mouse14",
+        "mouse19"
+      ],
+      "test": [
+        "mouse09",
+        "mouse13"
+      ],
+      "ratios": "0.7/0.2/0.1",
+      "seed": 42,
+      "test_frames": 34144,
+      "n_test_videos": 2,
+      "protocol": "single mouse-level random 70/20/10 split (scripts/02_build_videos.py)",
+      "threshold_protocol": "inconsistent across scripts: training loop tunes thresholds on TRAIN and applies them to VAL; evaluate_testset.py tunes thresholds ON TEST; Fig.1B scripts use val-tuned thresholds",
+      "stale_split_json": {
+        "path": "D:/DeepGroomNet_v3/outputs/meta\\split.json",
+        "n_videos": 20,
+        "sources": [
+          "downloaddatasets"
+        ],
+        "note": ""
+      }
+    },
+    "new": {
+      "protocol": "animal-level 5-fold CV",
+      "folds": 5,
+      "test_per_fold": 4,
+      "train_per_fold": 12,
+      "val_per_fold": 4,
+      "total_test_evaluations": 20,
+      "each_mouse_tested_once": true,
+      "threshold_protocol": "tuned on fold validation videos only (argmax per-class F1, valid bg), frozen for test",
+      "seed": 42
+    }
+  }
+}

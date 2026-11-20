@@ -1,0 +1,55 @@
+{
+  "name": "holdout",
+  "splits": {
+    "train": {
+      "videos": [
+        "E:/tsy/downloaddatasets2\\OFT_12.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_15.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_16.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_23.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_24.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_38.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_39.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_41.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_43.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_44.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_49.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_5.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_50.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_54.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_58.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_6.mp4"
+      ],
+      "n_videos": 16,
+      "n_frames": 243705,
+      "pct": {
+        "background": 71.15,
+        "Supported": 16.56,
+        "Unsupported": 9.91,
+        "Grooming": 2.38
+      }
+    },
+    "val": {
+      "videos": [
+        "E:/tsy/downloaddatasets2\\OFT_52.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_11.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_51.mp4",
+        "E:/tsy/downloaddatasets2\\OFT_14.mp4"
+      ],
+      "n_videos": 4,
+      "n_frames": 60929,
+      "pct": {
+        "background": 71.11,
+        "Supported": 16.67,
+        "Unsupported": 9.79,
+        "Grooming": 2.43
+      }
+    }
+  },
+  "checks": {
+    "disjoint": true,
+    "nonempty": true
+  },
+  "status": "PASS",
+  "note": "stage-1 is an intermediate transfer step; a separate test set is intentionally absent. Use 5fold mode for stage-1 generalization evidence."
+}
